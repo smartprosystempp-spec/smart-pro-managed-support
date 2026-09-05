@@ -1,0 +1,10 @@
+# Python generated files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
