@@ -1,24 +1,9 @@
-# Smart Pro Managed Support — 3.0.0 Foundation
+# Smart Pro Managed Support — 3.1.0 QA
 
-## Αναμενόμενη πρώτη δοκιμή
-
-Με Smart Pro Tools 2.4.6 ενεργό, ανοίξτε το Ingress του νέου add-on.
-
-Στην τρέχουσα εγκατάσταση, μέχρι να προστεθεί το `managed_remote_support` entitlement στο Portal, αναμένεται:
-
-- σωστό Installation ID,
-- σωστή συνδρομή/κατάσταση,
-- Managed entitlement = Όχι,
-- local policy = denied,
-- reason code = `entitlement_missing`,
-- Remote access = Όχι.
-
-Αυτό είναι επιτυχές foundation checkpoint.
-
-## Δεν πρέπει να συμβεί
-
-- να δημιουργηθεί νέο MeshCentral node,
-- να εκτελεστεί MeshAgent,
-- να ζητηθεί κωδικός/session/customer approval,
-- να τροποποιηθεί Smart Pro Tools,
-- να επηρεαστεί Guest/Temporary 0.9.6 ή legacy Managed 2.5.2.
+1. Broker 0.26.0 must be active first.
+2. Open the add-on after updating 3.0.0 → 3.1.0. Local policy should still show ID-95948 and ALLOWED, but Broker identity should be No.
+3. In WordPress → Remote Sessions → Managed Support, issue one one-time pairing for ID-95948.
+4. Enter that code once in the 3.1.0 Ingress page.
+5. Expected: Broker identity = Yes, Broker server authorization = Yes / `allowed`, server lease present, authorization chain = Yes.
+6. Remote access must remain No. No new MeshCentral SPMNG node must appear.
+7. Do not use any legacy support-session/60-second runtime controls for this 3.x QA.

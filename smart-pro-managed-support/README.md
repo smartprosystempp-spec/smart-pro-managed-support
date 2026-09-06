@@ -1,11 +1,18 @@
-# Smart Pro Managed Support 3.0.0
+# Smart Pro Managed Support 3.1.0
 
-Πρώτο foundation της νέας συνδρομητικής Managed αρχιτεκτονικής.
+Authorization-only Home Assistant add-on for the subscription Managed Remote Support architecture.
 
-Αυτή η έκδοση **δεν παρέχει remote access**. Σκοπός της είναι να αποδείξει με ασφάλεια ότι το νέο, ανεξάρτητο add-on:
+## Active in 3.1.0
+- Read-only Smart Pro Tools policy from `/share/smart-pro-system/managed-policy.json`.
+- One-time pairing with Smart Pro Remote Session Broker 0.26.0+.
+- Persistent Managed node identity under the add-on private `/data` directory.
+- Authenticated heartbeat every 60 seconds.
+- Server Authorization Contract v1 with a bounded lease (server maximum 180 seconds).
+- Overall authorization requires both local policy and server authorization.
 
-- εγκαθίσταται με νέο slug,
-- συνυπάρχει με το legacy 2.5.2 και το Guest/Temporary add-on,
-- διαβάζει read-only το Managed Policy Contract v1 του Smart Pro Tools 2.4.6,
-- απορρίπτει stale/invalid/missing policy,
-- εμφανίζει Installation ID, subscription/entitlement state και Tools liveness.
+## Still disabled
+- `.msh` delivery
+- MeshAgent download or execution
+- MeshCentral connection/node creation
+- Remote desktop/terminal/files/tunnel
+- Any host service installation or persistence
