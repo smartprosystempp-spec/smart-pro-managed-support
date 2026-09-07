@@ -1,5 +1,17 @@
 # Changelog
 
+## 3.6.0 — Foreground MeshAgent Connectivity Canary
+
+- Πρώτη πραγματική Managed 3.x foreground εκτέλεση MeshAgent, μόνο μετά από πλήρη fresh verified chain και Broker 0.31.0 execution-canary authorization.
+- Hard runtime έως 45s, lease-bounded και server-watch controlled.
+- Private ephemeral runtime directory 0700.
+- Verified MeshAgent ephemeral copy chmod 0700 μόνο μέσα στο canary runtime.
+- Ephemeral meshagent.msh mode 0600 με disableUpdate/noUpdateCoreModule hardening.
+- Launch: `setsid ./meshagent` χωρίς args, χωρίς `-install`, χωρίς service persistence.
+- stdout/stderr δεν αποθηκεύονται.
+- Desktop/Terminal/Files παραμένουν NOT AUTHORIZED.
+- Runtime directory διαγράφεται μετά το stop/report.
+
 ## 3.5.0 — Runtime Lease Dry-Run Consumer
 
 - Προσθέτει verification-only consumer του Broker 0.30.0 `smart-pro-managed-runtime-lease-v1`.

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-VERSION="${SMART_PRO_MANAGED_VERSION:-3.4.0}"
+VERSION="${SMART_PRO_MANAGED_VERSION:-3.6.0}"
 PORT="8098"
 
 umask 077
@@ -10,10 +10,10 @@ ulimit -c 0 2>/dev/null || true
 echo "===================================================="
 echo "  Smart Pro Managed Support"
 echo "===================================================="
-echo "Κατάσταση: AGENT BINARY VERIFICATION CONSUMER ${VERSION}"
+echo "Κατάσταση: FOREGROUND CONNECTIVITY CANARY ${VERSION}"
 echo "Το Ingress UI ακούει μόνο στο εσωτερικό port ${PORT}."
-echo "Ενεργά: read-only Managed Policy + Broker identity/heartbeat + Server Authorization + fresh enrollment + secure .msh verification + one-time MeshAgent binary request/consume + SHA/bytes/ELF64/architecture verification."
-echo "Ανενεργά: persistent .msh/agent storage, chmod +x, MeshAgent execution, MeshCentral runtime, remote access."
+echo "Ενεργά: verified Managed chain + renewable runtime lease + one-time execution-canary authorization + foreground MeshAgent connectivity έως 45s."
+echo "Ανενεργά: MeshAgent -install, service persistence, unattended permanent runtime, Desktop/Terminal/Files authorization. Runtime material παραμένει ephemeral."
 echo "===================================================="
 
 exec python3 /opt/smart-pro/app.py

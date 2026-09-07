@@ -1,6 +1,6 @@
 name: "Smart Pro Managed Support"
-description: "Runtime Lease Dry-Run Consumer. Ανανεώνει την verified Managed 3.x αλυσίδα, ζητά βραχύβιο renewable runtime lease και το ανανεώνει μία φορά χωρίς MeshAgent execution, MeshCentral runtime ή remote access στην 3.5.0."
-version: "3.5.0"
+description: "Foreground MeshAgent Connectivity Canary. Εκτελεί μόνο χειροκίνητο, server-authorized foreground canary έως 45s χωρίς -install/service persistence και χωρίς technician actions."
+version: "3.6.0"
 slug: "smart_pro_managed_support"
 arch:
   - aarch64

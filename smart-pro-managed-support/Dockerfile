@@ -1,12 +1,13 @@
 FROM debian:bookworm-slim
 
-ARG BUILD_VERSION="3.4.0"
+ARG BUILD_VERSION="3.6.0"
 ARG BUILD_ARCH
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates \
         python3 \
+        util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 COPY run.sh /run.sh

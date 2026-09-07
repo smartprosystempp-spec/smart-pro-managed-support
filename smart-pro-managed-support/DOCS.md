@@ -1,10 +1,12 @@
-# Smart Pro Managed Support — 3.5.0 QA
+# Smart Pro Managed Support — 3.6.0 Controlled Canary QA
 
-1. Update 3.2.0 → 3.5.0 χωρίς uninstall/re-pairing.
-2. Επιβεβαίωσε ότι Managed authorization παραμένει ΕΠΙΤΡΕΠΕΤΑΙ και Remote access = Όχι.
-3. Το προηγούμενο 3.2.0 enrollment μπορεί να εμφανίζεται ως προηγούμενο VERIFIED· ο secure-settings έλεγχος θα εκτελέσει αυτόματα νέο enrollment δεμένο στη 3.5.0.
-4. Πάτησε μία φορά «Έλεγχος secure settings».
-5. Αναμενόμενο: VERIFIED, source fingerprint hint, SHA-256 hint, bytes και opaque `SPMNG-*` label.
-6. Δεν πρέπει να δημιουργηθεί MeshCentral node και δεν πρέπει να ξεκινήσει MeshAgent.
+1. Broker 0.31.0 πρέπει να είναι ήδη PASS.
+2. Update 3.5.0 → 3.6.0 χωρίς uninstall/re-pairing.
+3. Επιβεβαίωσε Managed authorization ALLOWED και Remote access = Όχι.
+4. Άνοιξε MeshCentral σε δεύτερο tab ΠΡΙΝ το canary.
+5. Πάτησε μία φορά «Έναρξη connectivity canary ≤45″».
+6. Παρατήρησε μόνο αν εμφανίζεται το expected `SPMNG-*` node. ΜΗΝ ανοίξεις Desktop/Terminal/Files.
+7. Μετά από 50–60s κάνε refresh στο Ingress. Αναμενόμενο reported result + runtime cleanup Ναι.
+8. Μετά το stop, το node μπορεί να φαίνεται offline.
 
-Το `.msh` και τα one-time tickets δεν πρέπει να κοινοποιούνται ή να εμφανίζονται σε screenshots/logs.
+Δεν κοινοποιούνται pairing/node secrets, .msh, agent tickets, runtime lease ή report token.
