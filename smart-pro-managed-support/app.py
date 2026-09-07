@@ -7,6 +7,8 @@ import json
 import os
 import re
 import secrets
+import stat
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -16,7 +18,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.3.0")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.4.0")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -28,6 +30,7 @@ DATA_DIR = Path("/data")
 IDENTITY_FILE = DATA_DIR / "managed-identity.json"
 ENROLLMENT_STATE_FILE = DATA_DIR / "enrollment-authorization.json"
 SETTINGS_STATE_FILE = DATA_DIR / "settings-verification.json"
+AGENT_STATE_FILE = DATA_DIR / "agent-binary-verification.json"
 EXPECTED_CONTRACT = "smart-pro-managed-policy-v1"
 EXPECTED_POLICY_VERSION = 1
 EXPECTED_SERVER_AUTH_VERSION = 1
@@ -40,9 +43,13 @@ NODE_ID_RE = re.compile(r"^SPMN-[A-F0-9]{32}$")
 NODE_SECRET_RE = re.compile(r"^SPMS-[A-Za-z0-9_-]{43}$")
 BOOTSTRAP_TICKET_RE = re.compile(r"^SPMB-[A-Za-z0-9_-]{43}$")
 SETTINGS_TICKET_RE = re.compile(r"^SPMD-[A-Za-z0-9_-]{43}$")
+AGENT_TICKET_RE = re.compile(r"^SPMA-[A-Za-z0-9_-]{43}$")
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 AGENT_LABEL_RE = re.compile(r"^SPMNG-[A-F0-9]{16}$")
 FINGERPRINT_HINT_RE = re.compile(r"^[a-f0-9]{12}$")
+MIN_AGENT_BYTES = 100000
+MAX_AGENT_BYTES = 67108864
+ELF_MACHINE = {"aarch64": 183, "amd64": 62}
 CSRF_TOKEN = secrets.token_urlsafe(24)
 STATE_LOCK = threading.RLock()
 SERVER_STATE = {
@@ -259,6 +266,106 @@ def broker_post(endpoint, payload):
         raise RuntimeError(f"{code}|{message}") from None
     except (URLError, TimeoutError, OSError) as exc:
         raise RuntimeError("broker_unreachable|Δεν ήταν δυνατή η επικοινωνία με τον Smart Pro Broker.") from exc
+
+
+
+def broker_binary_post(endpoint, payload, expected_bytes):
+    """POST JSON and stream a verification-only binary to a private 0600 temp file.
+
+    The raw SPMA ticket exists only in the caller's memory. The binary is never
+    persisted under /data and this helper never makes it executable.
+    """
+    expected_bytes = _as_int(expected_bytes) or 0
+    if expected_bytes < MIN_AGENT_BYTES or expected_bytes > MAX_AGENT_BYTES:
+        raise RuntimeError("agent_expected_size_invalid|Το αναμενόμενο μέγεθος MeshAgent δεν είναι έγκυρο.")
+
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    req = Request(
+        BROKER_BASE + endpoint,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/octet-stream",
+            "User-Agent": f"SmartProManaged/{VERSION}",
+        },
+        method="POST",
+    )
+    temp_path = None
+    success = False
+    try:
+        with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            content_type = _safe_str(resp.headers.get("Content-Type"), 100).lower()
+            contract = _safe_str(resp.headers.get("X-Smart-Pro-Agent-Contract"), 100)
+            response_arch = _safe_str(resp.headers.get("X-Smart-Pro-Agent-Architecture"), 30)
+            response_sha = _safe_str(resp.headers.get("X-Smart-Pro-Agent-SHA256"), 80).lower()
+            execution = _safe_str(resp.headers.get("X-Smart-Pro-Agent-Execution"), 30).lower()
+            remote_access = _safe_str(resp.headers.get("X-Smart-Pro-Remote-Access"), 30).lower()
+            content_length = _as_int(resp.headers.get("Content-Length")) or 0
+
+            if not content_type.startswith("application/octet-stream"):
+                raise RuntimeError("agent_content_type_invalid|Ο Broker δεν επέστρεψε binary MeshAgent payload.")
+            if contract != "smart-pro-managed-agent-v1":
+                raise RuntimeError("agent_contract_invalid|Το MeshAgent binary contract δεν είναι συμβατό.")
+            if response_arch != ARCH:
+                raise RuntimeError("agent_arch_header_mismatch|Η αρχιτεκτονική του MeshAgent response δεν συμφωνεί με το add-on.")
+            if not SHA256_RE.fullmatch(response_sha):
+                raise RuntimeError("agent_sha_header_invalid|Ο Broker δεν επέστρεψε έγκυρο MeshAgent SHA-256.")
+            if execution != "disabled" or remote_access != "disabled":
+                raise RuntimeError("agent_safety_header_invalid|Το MeshAgent response δεν επιβεβαιώνει verification-only λειτουργία.")
+            if content_length and content_length != expected_bytes:
+                raise RuntimeError("agent_content_length_mismatch|Το Content-Length του MeshAgent δεν συμφωνεί με το εγκεκριμένο μέγεθος.")
+
+            fd, temp_path = tempfile.mkstemp(prefix="smart-pro-managed-agent-", suffix=".bin", dir="/tmp")
+            os.chmod(temp_path, 0o600)
+            digest = hashlib.sha256()
+            total = 0
+            with os.fdopen(fd, "wb") as handle:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > expected_bytes or total > MAX_AGENT_BYTES:
+                        raise RuntimeError("agent_stream_too_large|Το MeshAgent payload ξεπέρασε το εγκεκριμένο μέγεθος.")
+                    handle.write(chunk)
+                    digest.update(chunk)
+                handle.flush()
+                os.fsync(handle.fileno())
+
+            if total != expected_bytes:
+                raise RuntimeError("agent_stream_size_mismatch|Το MeshAgent payload δεν έχει το εγκεκριμένο μέγεθος.")
+            success = True
+            return {
+                "path": temp_path,
+                "bytes": total,
+                "sha256": digest.hexdigest(),
+                "header_sha256": response_sha,
+                "architecture": response_arch,
+            }
+    except HTTPError as exc:
+        raw = exc.read(MAX_RESPONSE_BYTES + 1)
+        code = f"http_{exc.code}"
+        message = f"Ο Broker απέρριψε τη λήψη MeshAgent (HTTP {exc.code})."
+        try:
+            data = json.loads(raw.decode("utf-8"))
+            if isinstance(data, dict):
+                code = _safe_str(data.get("code") or code, 100)
+                message = _safe_str(data.get("message") or message)
+        except (UnicodeError, json.JSONDecodeError):
+            pass
+        raise RuntimeError(f"{code}|{message}") from None
+    except (URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError("broker_unreachable|Δεν ήταν δυνατή η ασφαλής λήψη MeshAgent από τον Smart Pro Broker.") from exc
+    except RuntimeError:
+        raise
+    finally:
+        # Failed/abandoned downloads are removed here. On success the caller
+        # owns the immediate verify+delete lifecycle.
+        if temp_path and not success:
+            try:
+                Path(temp_path).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def set_server_state(**updates):
@@ -795,6 +902,201 @@ def verify_secure_settings():
     )
     return state
 
+
+
+def load_agent_state():
+    try:
+        if not AGENT_STATE_FILE.exists():
+            return {}
+        if AGENT_STATE_FILE.stat().st_size <= 0 or AGENT_STATE_FILE.stat().st_size > 16384:
+            return {}
+        data = json.loads(AGENT_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    sha_hint = _safe_str(data.get("sha256_hint"), 20).lower()
+    if sha_hint and not re.fullmatch(r"^[a-f0-9]{12}$", sha_hint):
+        return {}
+    architecture = _safe_str(data.get("architecture"), 20)
+    if architecture and architecture not in ELF_MACHINE:
+        return {}
+    return {
+        "verified": data.get("verified") is True,
+        "verified_at": _as_int(data.get("verified_at")) or 0,
+        "sha256_hint": sha_hint,
+        "bytes": _as_int(data.get("bytes")) or 0,
+        "architecture": architecture,
+        "elf_class": _safe_str(data.get("elf_class"), 20),
+        "endianness": _safe_str(data.get("endianness"), 20),
+        "e_machine": _as_int(data.get("e_machine")) or 0,
+        "installation_id": _safe_str(data.get("installation_id"), 100).upper(),
+        "node_id": _safe_str(data.get("node_id"), 64).upper(),
+        "client_version": _safe_str(data.get("client_version"), 30),
+    }
+
+
+def save_agent_state(state):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = AGENT_STATE_FILE.with_suffix(".tmp")
+    payload = json.dumps(state, ensure_ascii=False, separators=(",", ":"))
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, AGENT_STATE_FILE)
+        os.chmod(AGENT_STATE_FILE, 0o600)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    total = 0
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_AGENT_BYTES:
+                raise RuntimeError("agent_disk_size_invalid|Το προσωρινό MeshAgent αρχείο ξεπέρασε το μέγιστο επιτρεπόμενο μέγεθος.")
+            digest.update(chunk)
+    return digest.hexdigest(), total
+
+
+def verify_elf64(path, architecture):
+    expected_machine = ELF_MACHINE.get(architecture)
+    if expected_machine is None:
+        raise RuntimeError("agent_arch_unsupported|Η αρχιτεκτονική MeshAgent δεν υποστηρίζεται.")
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        with open(path, "rb") as handle:
+            header = handle.read(64)
+    except OSError as exc:
+        raise RuntimeError("agent_temp_read_failed|Δεν ήταν δυνατός ο δεύτερος τοπικός έλεγχος του MeshAgent.") from exc
+    if mode & 0o111:
+        raise RuntimeError("agent_executable_bit_forbidden|Το verification-only MeshAgent αρχείο δεν πρέπει να είναι εκτελέσιμο.")
+    if len(header) < 20 or header[:4] != b"\x7fELF":
+        raise RuntimeError("agent_elf_invalid|Το MeshAgent δεν είναι έγκυρο ELF binary.")
+    if header[4] != 2:
+        raise RuntimeError("agent_elf_class_invalid|Το MeshAgent δεν είναι ELF64.")
+    if header[5] != 1:
+        raise RuntimeError("agent_elf_endian_invalid|Το MeshAgent δεν είναι little-endian ELF.")
+    machine = int.from_bytes(header[18:20], "little")
+    if machine != expected_machine:
+        raise RuntimeError("agent_elf_machine_mismatch|Το MeshAgent ELF e_machine δεν συμφωνεί με την αρχιτεκτονική του add-on.")
+    return machine
+
+
+def verify_agent_binary():
+    """Refresh 3.4.0 settings, receive one MeshAgent binary, verify twice, delete.
+
+    The SPMA ticket is memory-only. The binary exists only as a 0600 /tmp file
+    for the duration of the verification and is never chmod +x or executed.
+    """
+    snapshot = read_policy()
+    identity = load_identity()
+    server = get_server_state()
+    if identity is None:
+        raise RuntimeError("not_paired|Απαιτείται ενεργή Managed identity πριν από τον έλεγχο MeshAgent.")
+    if not snapshot.get("allowed_local"):
+        raise RuntimeError("local_policy_denied|Η τοπική Managed πολιτική δεν επιτρέπει έλεγχο MeshAgent αυτή τη στιγμή.")
+    server_valid_until = _as_int(server.get("valid_until")) or 0
+    if server.get("authorized_server") is not True or server_valid_until <= now_ts():
+        raise RuntimeError("server_authorization_required|Απαιτείται ενεργό Broker Server Authorization πριν από τον έλεγχο MeshAgent.")
+
+    # The Broker requires a recent settings consume bound to THIS 3.4.0 client.
+    settings = verify_secure_settings()
+    if settings.get("client_version") != VERSION or settings.get("architecture") != ARCH:
+        raise RuntimeError("agent_settings_binding_invalid|Ο νέος secure settings έλεγχος δεν δέθηκε στη σωστή έκδοση/αρχιτεκτονική.")
+
+    common = {
+        "node_id": identity["node_id"],
+        "node_secret": identity["node_secret"],
+        "client_version": VERSION,
+        "architecture": ARCH,
+    }
+    request_data = broker_post("/managed/agent-binary/request", common)
+    ticket = _safe_str(request_data.get("agent_ticket"), 80)
+    expected_sha = _safe_str(request_data.get("expected_sha256"), 80).lower()
+    expected_bytes = _as_int(request_data.get("expected_bytes")) or 0
+    expires_at = parse_iso_epoch(request_data.get("expires_at"))
+    request_server_until = _as_int(request_data.get("server_valid_until")) or parse_iso_epoch(request_data.get("server_valid_until"))
+
+    request_ok = (
+        request_data.get("success") is True
+        and request_data.get("mode") == "managed_support"
+        and request_data.get("phase") == "managed3_agent_binary_verification"
+        and request_data.get("agent_contract") == "smart-pro-managed-agent-v1"
+        and request_data.get("server_authorization") == "allowed"
+        and request_data.get("agent_delivery_authorized") is True
+        and request_data.get("agent_delivered") is False
+        and request_data.get("verification_only") is True
+        and request_data.get("execution") is False
+        and request_data.get("remote_access") is False
+        and request_data.get("meshcentral_runtime") is False
+        and AGENT_TICKET_RE.fullmatch(ticket) is not None
+        and SHA256_RE.fullmatch(expected_sha) is not None
+        and MIN_AGENT_BYTES <= expected_bytes <= MAX_AGENT_BYTES
+        and expires_at > now_ts()
+        and request_server_until > now_ts()
+        and expires_at <= request_server_until
+    )
+    if not request_ok:
+        raise RuntimeError("agent_request_contract_invalid|Ο Broker επέστρεψε μη έγκυρο MeshAgent verification contract.")
+
+    consume_payload = dict(common)
+    consume_payload["agent_ticket"] = ticket
+    temp_path = None
+    try:
+        result = broker_binary_post("/managed/agent-binary/consume", consume_payload, expected_bytes)
+        temp_path = result.get("path")
+        stream_sha = _safe_str(result.get("sha256"), 80).lower()
+        header_sha = _safe_str(result.get("header_sha256"), 80).lower()
+        if not temp_path or not Path(temp_path).is_file():
+            raise RuntimeError("agent_temp_missing|Το προσωρινό MeshAgent αρχείο δεν δημιουργήθηκε σωστά.")
+        if not secrets.compare_digest(stream_sha, expected_sha) or not secrets.compare_digest(header_sha, expected_sha):
+            raise RuntimeError("agent_stream_integrity_mismatch|Το MeshAgent απέτυχε στον πρώτο SHA-256 έλεγχο.")
+
+        machine = verify_elf64(temp_path, ARCH)
+        disk_sha, disk_bytes = sha256_file(temp_path)
+        if disk_bytes != expected_bytes or not secrets.compare_digest(disk_sha, expected_sha):
+            raise RuntimeError("agent_disk_integrity_mismatch|Το MeshAgent απέτυχε στον δεύτερο έλεγχο ακεραιότητας από disk.")
+
+        state = {
+            "verified": True,
+            "verified_at": now_ts(),
+            "sha256_hint": disk_sha[:12],
+            "bytes": disk_bytes,
+            "architecture": ARCH,
+            "elf_class": "ELF64",
+            "endianness": "little-endian",
+            "e_machine": machine,
+            "installation_id": identity["installation_id"],
+            "node_id": identity["node_id"],
+            "client_version": VERSION,
+        }
+        save_agent_state(state)
+        print(
+            f"[managed] MeshAgent binary verified for {identity['installation_id']} "
+            f"arch={ARCH} sha_hint={disk_sha[:12]} bytes={disk_bytes} e_machine={machine}; temp binary deleted, not executed",
+            flush=True,
+        )
+        return state
+    finally:
+        if temp_path:
+            try:
+                Path(temp_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
 def heartbeat_worker():
     last_summary = None
     while True:
@@ -827,6 +1129,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
     identity = load_identity()
     enrollment = load_enrollment_state()
     settings_state = load_settings_state()
+    agent_state = load_agent_state()
 
     local_allowed = bool(local_snapshot.get("allowed_local"))
     server_allowed = bool(server.get("authorized_server")) and (_as_int(server.get("valid_until")) or 0) > now_ts()
@@ -880,6 +1183,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 
     enrollment_html = ""
     settings_html = ""
+    agent_html = ""
     if identity is not None:
         enrollment_verified = (
             enrollment.get("verified") is True
@@ -888,7 +1192,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         )
         enrollment_current = enrollment_verified and enrollment.get("client_version") == VERSION and enrollment.get("architecture") == ARCH
         if enrollment_current:
-            enrollment_label = "VERIFIED — τρέχον 3.3.0 enrollment consume"
+            enrollment_label = "VERIFIED — τρέχον 3.4.0 enrollment consume"
         elif enrollment_verified:
             enrollment_label = f"Προηγούμενο VERIFIED ({enrollment.get('client_version') or 'άγνωστη έκδοση'}) — θα ανανεωθεί αυτόματα"
         else:
@@ -911,23 +1215,27 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </form>
 </section>"""
 
-        settings_verified = (
+        settings_any_verified = (
             settings_state.get("verified") is True
             and settings_state.get("installation_id") == identity["installation_id"]
             and settings_state.get("node_id") == identity["node_id"]
-            and settings_state.get("client_version") == VERSION
-            and settings_state.get("architecture") == ARCH
         )
-        settings_label = "VERIFIED — .msh επαληθεύτηκε και δεν αποθηκεύτηκε" if settings_verified else "Δεν έχει εκτελεστεί ακόμη"
-        settings_time = fmt_epoch(settings_state.get("verified_at")) if settings_verified else "—"
-        settings_hint = settings_state.get("source_fingerprint_hint") if settings_verified else "—"
-        settings_sha = settings_state.get("sha256_hint") if settings_verified else "—"
-        settings_bytes = str(settings_state.get("bytes")) if settings_verified else "—"
-        settings_agent = settings_state.get("agent_label") if settings_verified else "—"
+        settings_verified = settings_any_verified and settings_state.get("client_version") == VERSION and settings_state.get("architecture") == ARCH
+        if settings_verified:
+            settings_label = "VERIFIED — τρέχον 3.4.0 .msh verification"
+        elif settings_any_verified:
+            settings_label = f"Προηγούμενο VERIFIED ({settings_state.get('client_version') or 'άγνωστη έκδοση'}) — θα ανανεωθεί αυτόματα"
+        else:
+            settings_label = "Δεν έχει εκτελεστεί ακόμη"
+        settings_time = fmt_epoch(settings_state.get("verified_at")) if settings_any_verified else "—"
+        settings_hint = settings_state.get("source_fingerprint_hint") if settings_any_verified else "—"
+        settings_sha = settings_state.get("sha256_hint") if settings_any_verified else "—"
+        settings_bytes = str(settings_state.get("bytes")) if settings_any_verified else "—"
+        settings_agent = settings_state.get("agent_label") if settings_any_verified else "—"
         settings_html = f"""
 <section class="pairbox">
 <h2>Secure settings verification</h2>
-<p>Εκτελεί νέο enrollment authorization για την 3.3.0 και μετά ζητά/καταναλώνει ακριβώς ένα one-time secure settings ticket. Το raw ticket και το <strong>.msh δεν αποθηκεύονται</strong>. Ελέγχονται integrity, required fields, ασφαλές WSS endpoint και opaque node label.</p>
+<p>Εκτελεί νέο enrollment authorization για την 3.4.0 και μετά ζητά/καταναλώνει ακριβώς ένα one-time secure settings ticket. Το raw ticket και το <strong>.msh δεν αποθηκεύονται</strong>. Ελέγχονται integrity, required fields, ασφαλές WSS endpoint και opaque node label.</p>
 <div class="mini-grid">
 <div><span>Κατάσταση</span><strong>{esc(settings_label)}</strong></div>
 <div><span>Τελευταίος έλεγχος</span><strong>{esc(settings_time)}</strong></div>
@@ -942,17 +1250,50 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </form>
 </section>"""
 
+        agent_verified = (
+            agent_state.get("verified") is True
+            and agent_state.get("installation_id") == identity["installation_id"]
+            and agent_state.get("node_id") == identity["node_id"]
+            and agent_state.get("client_version") == VERSION
+            and agent_state.get("architecture") == ARCH
+        )
+        agent_label = "VERIFIED — binary ελέγχθηκε δύο φορές και διαγράφηκε" if agent_verified else "Δεν έχει εκτελεστεί ακόμη"
+        agent_time = fmt_epoch(agent_state.get("verified_at")) if agent_verified else "—"
+        agent_sha = agent_state.get("sha256_hint") if agent_verified else "—"
+        agent_bytes = str(agent_state.get("bytes")) if agent_verified else "—"
+        agent_elf = agent_state.get("elf_class") if agent_verified else "—"
+        agent_arch = agent_state.get("architecture") if agent_verified else "—"
+        agent_machine = str(agent_state.get("e_machine")) if agent_verified else "—"
+        agent_html = f"""
+<section class="pairbox">
+<h2>MeshAgent binary verification</h2>
+<p>Ανανεώνει αυτόματα enrollment + secure settings για την 3.4.0 και μετά ζητά/καταναλώνει ακριβώς ένα one-time MeshAgent binary ticket. Το binary γράφεται μόνο προσωρινά με mode 0600, ελέγχεται SHA/bytes/ELF64/architecture δεύτερη φορά από disk και <strong>διαγράφεται αμέσως</strong>. Δεν γίνεται chmod +x ή execution.</p>
+<div class="mini-grid">
+<div><span>Κατάσταση</span><strong>{esc(agent_label)}</strong></div>
+<div><span>Τελευταίος έλεγχος</span><strong>{esc(agent_time)}</strong></div>
+<div><span>Agent SHA-256 hint</span><strong>{esc(agent_sha)}</strong></div>
+<div><span>Bytes</span><strong>{esc(agent_bytes)}</strong></div>
+<div><span>ELF / Arch</span><strong>{esc(agent_elf)} · {esc(agent_arch)}</strong></div>
+<div><span>ELF e_machine</span><strong>{esc(agent_machine)}</strong></div>
+</div>
+<form method="post" action="agent-check">
+<input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
+<button type="submit"{disabled}>Έλεγχος MeshAgent binary</button>
+</form>
+</section>"""
+
     return f"""<!doctype html>
 <html lang="el"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Smart Pro Managed Support</title>
 <style>
 :root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;background:#10151d;color:#eef5ff;font:14px/1.5 Arial,Helvetica,sans-serif}}main{{max-width:1000px;margin:0 auto;padding:24px}}.hero{{background:#172231;border:1px solid #2c4158;border-radius:16px;padding:22px;margin-bottom:16px}}h1{{margin:0 0 5px;font-size:27px}}h2{{margin:0 0 10px;font-size:18px}}.sub{{color:#aab9ca}}.badge{{display:inline-block;margin-top:14px;padding:8px 12px;border-radius:999px;font-weight:700}}.ok{{background:#173a2a;color:#9ff0bd;border:1px solid #2c7750}}.bad{{background:#442128;color:#ffb5c0;border:1px solid #8c3d4d}}.warn{{background:#43381a;color:#ffe49a;border:1px solid #8b7331}}.note{{margin-top:15px;padding:13px 15px;border-radius:10px;background:#12293a;border:1px solid #245473;color:#cfeeff}}.notice{{margin:0 0 16px;padding:12px 14px;border-radius:10px}}.notice-ok{{background:#173a2a;border:1px solid #2c7750;color:#bdf7d0}}.notice-bad{{background:#442128;border:1px solid #8c3d4d;color:#ffd0d6}}.notice-info{{background:#12293a;border:1px solid #245473;color:#cfeeff}}.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.card,.pairbox{{background:#171d26;border:1px solid #293646;border-radius:12px;padding:15px}}.k{{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:#8fa1b5}}.v{{font-size:15px;font-weight:700;margin-top:4px;overflow-wrap:anywhere}}.pairbox{{margin:16px 0}}.pairbox p{{color:#b7c5d5}}label{{display:block;font-weight:700;margin:12px 0 6px}}input{{width:100%;max-width:460px;padding:11px 12px;border-radius:8px;border:1px solid #3b4c60;background:#0f151d;color:#fff;font:inherit}}button{{display:block;margin-top:12px;border:0;border-radius:8px;padding:10px 14px;background:#19aee8;color:#06131b;font-weight:800;cursor:pointer}}button:disabled,input:disabled{{opacity:.5;cursor:not-allowed}}code{{color:#9fdfff}}.mini-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.mini-grid div{{background:#111821;border:1px solid #28384a;border-radius:9px;padding:10px}}.mini-grid span{{display:block;color:#8fa1b5;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}}.mini-grid strong{{overflow-wrap:anywhere}}.footer{{margin-top:18px;color:#7f91a6;font-size:12px}}@media(max-width:650px){{main{{padding:14px}}.grid,.mini-grid{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.3.0 · Secure Settings Verification Consumer · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
+<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.4.0 · Agent Binary Verification Consumer · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
 {notice_html}
 {pair_html}
 {enrollment_html}
 {settings_html}
+{agent_html}
 <section class="grid">
 <div class="card"><div class="k">Installation ID</div><div class="v">{esc(policy.get('installation_id') or (identity or {}).get('installation_id'))}</div></div>
 <div class="card"><div class="k">Smart Pro Tools</div><div class="v">v{esc((policy.get('source') or {}).get('addon_version'))} · Online: {esc(tools_online)}</div></div>
@@ -967,12 +1308,12 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <div class="card"><div class="k">Authorization chain</div><div class="v">{esc(overall_text)}</div></div>
 <div class="card"><div class="k">Remote access</div><div class="v">Όχι — MeshCentral runtime δεν έχει ενεργοποιηθεί</div></div>
 </section>
-<div class="footer">3.3.0 secure-settings verification consumer. Το one-time settings ticket και το raw .msh δεν αποθηκεύονται. Δεν κατεβάζει ή εκτελεί MeshAgent, δεν δημιουργεί MeshCentral node και δεν παρέχει remote access.</div>
+<div class="footer">3.4.0 agent-binary verification consumer. Enrollment και secure settings ανανεώνονται πριν από το one-time binary verification. Το MeshAgent binary διαγράφεται αμέσως, δεν γίνεται εκτελέσιμο, δεν εκτελείται και δεν δημιουργεί MeshCentral node ή remote access.</div>
 </main></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SmartProManaged/3.3.0"
+    server_version = "SmartProManaged/3.4.0"
 
     def _send(self, code, body, content_type):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
@@ -1014,6 +1355,9 @@ class Handler(BaseHTTPRequestHandler):
                 "secure_settings_verified_once": bool(load_settings_state().get("verified")),
                 "secure_settings_source_fingerprint_hint": load_settings_state().get("source_fingerprint_hint") or "",
                 "secure_settings_sha256_hint": load_settings_state().get("sha256_hint") or "",
+                "agent_binary_verified_once": bool(load_agent_state().get("verified")),
+                "agent_binary_sha256_hint": load_agent_state().get("sha256_hint") or "",
+                "agent_binary_architecture": load_agent_state().get("architecture") or "",
                 "installation_id": policy.get("installation_id") or server.get("installation_id"),
             }
             self._send(200, json.dumps(payload, ensure_ascii=False), "application/json; charset=utf-8")
@@ -1025,7 +1369,8 @@ class Handler(BaseHTTPRequestHandler):
         is_pair = path.endswith("/pair") or path == "pair"
         is_enrollment = path.endswith("/enrollment-check") or path == "enrollment-check"
         is_settings = path.endswith("/settings-check") or path == "settings-check"
-        if not is_pair and not is_enrollment and not is_settings:
+        is_agent = path.endswith("/agent-check") or path == "agent-check"
+        if not is_pair and not is_enrollment and not is_settings and not is_agent:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
         length = _as_int(self.headers.get("Content-Length")) or 0
@@ -1077,13 +1422,35 @@ class Handler(BaseHTTPRequestHandler):
                 )
             return
 
+        if is_settings:
+            try:
+                verify_secure_settings()
+                self._send(
+                    200,
+                    render_page(
+                        read_policy(),
+                        "Το secure .msh παραλήφθηκε, επαληθεύτηκε τοπικά και δεν αποθηκεύτηκε. MeshAgent και remote access παραμένουν ανενεργά.",
+                        "ok",
+                    ),
+                    "text/html; charset=utf-8",
+                )
+            except RuntimeError as exc:
+                text = str(exc)
+                _, _, message = text.partition("|")
+                self._send(
+                    400,
+                    render_page(read_policy(), message or "Ο έλεγχος secure settings απέτυχε.", "bad"),
+                    "text/html; charset=utf-8",
+                )
+            return
+
         try:
-            verify_secure_settings()
+            verify_agent_binary()
             self._send(
                 200,
                 render_page(
                     read_policy(),
-                    "Το secure .msh παραλήφθηκε, επαληθεύτηκε τοπικά και δεν αποθηκεύτηκε. MeshAgent και remote access παραμένουν ανενεργά.",
+                    "Το MeshAgent binary παραλήφθηκε, επαληθεύτηκε δύο φορές από SHA/bytes/ELF/architecture και διαγράφηκε. Δεν έγινε εκτελέσιμο και δεν εκτελέστηκε.",
                     "ok",
                 ),
                 "text/html; charset=utf-8",
@@ -1093,7 +1460,7 @@ class Handler(BaseHTTPRequestHandler):
             _, _, message = text.partition("|")
             self._send(
                 400,
-                render_page(read_policy(), message or "Ο έλεγχος secure settings απέτυχε.", "bad"),
+                render_page(read_policy(), message or "Ο έλεγχος MeshAgent binary απέτυχε.", "bad"),
                 "text/html; charset=utf-8",
             )
 
@@ -1103,7 +1470,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"[managed] Smart Pro Managed Support {VERSION} secure settings verification consumer listening on {PORT}", flush=True)
+    print(f"[managed] Smart Pro Managed Support {VERSION} agent binary verification consumer listening on {PORT}", flush=True)
     thread = threading.Thread(target=heartbeat_worker, name="managed-heartbeat", daemon=True)
     thread.start()
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

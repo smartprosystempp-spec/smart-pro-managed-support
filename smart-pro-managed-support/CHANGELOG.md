@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.4.0 — Agent Binary Verification Consumer
+
+- Προσθέτει verification-only one-time MeshAgent binary request/consume μέσω Broker 0.29.0.
+- Πριν από binary delivery εκτελεί fresh 3.4.0 enrollment + secure settings verification.
+- Το binary γράφεται μόνο σε /tmp με mode 0600, ελέγχεται streaming SHA/bytes, ELF64/little-endian/e_machine και ξανά SHA/bytes από disk.
+- Διαγράφεται αμέσως μετά τον έλεγχο, και σε failure cleanup path.
+- Δεν γίνεται chmod +x, δεν εκτελείται subprocess/MeshAgent και δεν δημιουργείται MeshCentral node.
+- Remote access παραμένει OFF.
+
 ## 3.3.0 — Secure Settings Verification Consumer
 - Fresh 3.3.0 enrollment authorization before settings delivery.
 - Dedicated Managed 3.x `/managed/settings/request` + `/consume` consumer.

@@ -1,6 +1,6 @@
 name: "Smart Pro Managed Support"
-description: "Secure Settings Verification Consumer. Παραλαμβάνει one-time επαληθευμένα Managed .msh settings μόνο για τοπικό integrity/format verification, χωρίς MeshAgent ή remote access στην 3.3.0."
-version: "3.3.0"
+description: "Agent Binary Verification Consumer. Παραλαμβάνει one-time επαληθευμένο MeshAgent binary μόνο για SHA/bytes/ELF/architecture verification και άμεση διαγραφή, χωρίς execution ή remote access στην 3.4.0."
+version: "3.4.0"
 slug: "smart_pro_managed_support"
 arch:
   - aarch64

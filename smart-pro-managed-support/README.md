@@ -1,14 +1,14 @@
-# Smart Pro Managed Support 3.3.0
+# Smart Pro Managed Support 3.4.0
 
-## Secure Settings Verification Consumer
+## Agent Binary Verification Consumer
 
-Η 3.3.0 είναι το επόμενο ελεγχόμενο βήμα μετά το verified 3.2.0 enrollment authorization.
+Η 3.4.0 είναι το επόμενο ελεγχόμενο βήμα μετά το verified 3.2.0 enrollment authorization.
 
 Ενεργά:
 - Smart Pro Tools Managed Policy Contract v1 (read-only),
 - Broker Managed identity + authenticated heartbeat,
 - Portal-backed Server Authorization Contract v1,
-- fresh one-time enrollment authorization bound to 3.3.0,
+- fresh one-time enrollment authorization bound to 3.4.0,
 - one-time Managed 3.x secure settings request/consume,
 - local verification του `.msh`: exact SHA-256, exact byte count, required MeshCentral fields, WSS endpoint και opaque `SPMNG-*` node label.
 
