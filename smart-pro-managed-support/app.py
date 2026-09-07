@@ -21,7 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.8.0")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.9.0")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -37,6 +37,7 @@ AGENT_STATE_FILE = DATA_DIR / "agent-binary-verification.json"
 RUNTIME_STATE_FILE = DATA_DIR / "runtime-lease-dry-run.json"
 CANARY_STATE_FILE = DATA_DIR / "identity-continuity-canary.json"
 PERSISTENT_STATE_FILE = DATA_DIR / "continuous-runtime-state.json"
+UNATTENDED_CONTROL_FILE = DATA_DIR / "unattended-runtime-control.json"
 MESH_IDENTITY_DIR = DATA_DIR / "meshagent-identity"
 MESH_IDENTITY_DB_FILE = MESH_IDENTITY_DIR / "meshagent.db"
 MESH_IDENTITY_META_FILE = MESH_IDENTITY_DIR / "identity-meta.json"
@@ -82,6 +83,9 @@ PERSISTENT_STOP_EVENT = threading.Event()
 PERSISTENT_RECONNECT_DELAYS = (5, 10, 20, 30, 60)
 PERSISTENT_MAX_CONSECUTIVE_EXITS = 5
 PERSISTENT_WATCH_FAILURE_GRACE = 45
+UNATTENDED_STARTUP_DELAY = 8
+UNATTENDED_STALE_RECOVERY_DELAY = 80
+UNATTENDED_FAILURE_RETRY_DELAY = 90
 SERVER_STATE = {
     "paired": False,
     "state": "unpaired",
@@ -2158,6 +2162,126 @@ def _persistent_state_update(base, **changes):
     return next_state
 
 
+
+
+def load_unattended_control():
+    """Read the non-secret desired unattended-runtime state. Missing file = disabled."""
+    try:
+        data = json.loads(UNATTENDED_CONTROL_FILE.read_text(encoding='utf-8'))
+    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
+        return {'enabled': False, 'enabled_at': 0, 'updated_at': 0, 'reason': 'not_enabled'}
+    if not isinstance(data, dict):
+        return {'enabled': False, 'enabled_at': 0, 'updated_at': 0, 'reason': 'invalid_control'}
+    return {
+        'enabled': data.get('enabled') is True,
+        'enabled_at': _as_int(data.get('enabled_at')) or 0,
+        'updated_at': _as_int(data.get('updated_at')) or 0,
+        'reason': _safe_str(data.get('reason'), 80),
+    }
+
+
+def save_unattended_control(enabled, reason):
+    """Persist only the admin's desired mode; no lease, ticket, token or MeshCentral secret."""
+    current = load_unattended_control()
+    now = now_ts()
+    safe = {
+        'enabled': bool(enabled),
+        'enabled_at': (current.get('enabled_at') or now) if enabled else 0,
+        'updated_at': now,
+        'reason': _safe_str(reason, 80),
+    }
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = UNATTENDED_CONTROL_FILE.with_suffix('.tmp')
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(json.dumps(safe, ensure_ascii=False, separators=(',', ':')))
+            handle.flush(); os.fsync(handle.fileno())
+        os.replace(tmp, UNATTENDED_CONTROL_FILE); os.chmod(UNATTENDED_CONTROL_FILE, 0o600)
+    finally:
+        try:
+            if tmp.exists(): tmp.unlink()
+        except OSError: pass
+    return safe
+
+
+def unattended_supervisor():
+    """Recover the foreground Managed runtime after add-on restart when explicitly enabled.
+
+    It never seeds a new MeshAgent identity. It waits for local + Broker authorization,
+    respects the Broker stale-runtime recovery window, and backs off after failed starts.
+    """
+    time.sleep(UNATTENDED_STARTUP_DELAY)
+    last_log = None
+    while True:
+        control = load_unattended_control()
+        if not control.get('enabled'):
+            time.sleep(5); continue
+        if PERSISTENT_WORKER_ACTIVE:
+            time.sleep(5); continue
+
+        identity = load_identity()
+        identity_status = get_mesh_identity_status(identity) if identity else {'state':'not_paired'}
+        local = read_policy()
+        server = get_server_state()
+        now = now_ts()
+
+        reason = ''
+        if identity is None:
+            reason = 'identity_missing'
+        elif identity_status.get('state') != 'ready':
+            reason = 'identity_not_ready'
+        elif not local.get('allowed_local'):
+            reason = 'local_policy_denied'
+        elif server.get('authorized_server') is not True or (_as_int(server.get('valid_until')) or 0) <= now:
+            reason = 'server_authorization_wait'
+
+        if reason:
+            if reason != last_log:
+                print(f"[managed] unattended supervisor waiting reason={reason}; no MeshAgent start", flush=True)
+                last_log = reason
+            time.sleep(10); continue
+
+        state = load_persistent_state()
+        state_code = _safe_str(state.get('result_code'), 80)
+        if state.get('status') == 'failed' and 'identity' in state_code:
+            save_unattended_control(False, 'identity_failure_requires_review')
+            print('[managed] unattended supervisor disabled after identity failure; manual review required', flush=True)
+            last_log = 'identity_failure_requires_review'
+            time.sleep(10); continue
+
+        # After an add-on/container restart, the previous server row may still be live.
+        # Broker 0.32.0 marks it stale after >75s without watch; wait locally before retry.
+        if state.get('status') in {'running','preparing','reconnecting','stopping'}:
+            anchor = max(_as_int(state.get('last_watch_at')) or 0, _as_int(state.get('started_at')) or 0)
+            if anchor and now < anchor + UNATTENDED_STALE_RECOVERY_DELAY:
+                reason = 'waiting_previous_runtime_stale_window'
+                if reason != last_log:
+                    print('[managed] unattended supervisor waiting for previous runtime stale window before restart recovery', flush=True)
+                    last_log = reason
+                time.sleep(10); continue
+
+        if state.get('status') == 'failed':
+            ended = _as_int(state.get('ended_at')) or 0
+            if ended and now < ended + UNATTENDED_FAILURE_RETRY_DELAY:
+                reason = 'start_retry_backoff'
+                if reason != last_log:
+                    print('[managed] unattended supervisor backing off after failed start', flush=True)
+                    last_log = reason
+                time.sleep(10); continue
+
+        try:
+            start_persistent_runtime()
+            print('[managed] unattended supervisor started continuous foreground runtime using existing stable identity', flush=True)
+            last_log = 'runtime_started'
+        except RuntimeError as exc:
+            code = str(exc).partition('|')[0] or 'start_failed'
+            if code != last_log:
+                print(f"[managed] unattended supervisor start deferred code={_safe_str(code,80)}", flush=True)
+                last_log = code
+        time.sleep(10)
+
+
 def _persistent_health(identity, control_token, health_state, reason=''):
     try:
         data = broker_post('/managed/persistent-runtime/health', {
@@ -2195,12 +2319,11 @@ def _persistent_launch(runtime_dir, env):
 
 
 def persistent_runtime_worker():
-    """First live continuous foreground runtime consumer.
+    """Continuous foreground runtime with explicit unattended enablement.
 
-    This 3.8.0 checkpoint is intentionally started manually from Ingress. Once
-    started, the MeshAgent may remain online indefinitely only while local policy,
-    live Broker authorization, continuous watch and the renewable runtime lease
-    remain valid. Technician actions remain explicitly unauthorized.
+    In 3.9.0 the admin can enable unattended mode once. After that, add-on restarts
+    recover the same stable MeshAgent identity automatically after local and Broker
+    authorization are valid. Technician actions remain explicitly unauthorized.
     """
     global PERSISTENT_WORKER_ACTIVE
     identity = load_identity()
@@ -2233,7 +2356,7 @@ def persistent_runtime_worker():
             raise RuntimeError('persistent_server_authorization_required|Απαιτείται ενεργό Broker Server Authorization πριν από τη συνεχή λειτουργία.')
         prior_identity = _validate_persisted_mesh_identity(identity, None)
         if prior_identity.get('state') != 'ready':
-            raise RuntimeError('persistent_identity_not_ready|Απαιτείται ήδη VERIFIED σταθερή MeshCentral ταυτότητα από το 3.7.0. Η 3.8.0 δεν δημιουργεί νέα identity.')
+            raise RuntimeError('persistent_identity_not_ready|Απαιτείται ήδη VERIFIED σταθερή MeshCentral ταυτότητα από το 3.7.0. Η 3.9.0 δεν δημιουργεί νέα identity.')
 
         base_state = {
             'status': 'preparing', 'verified': False, 'started_at': started_at,
@@ -2246,7 +2369,7 @@ def persistent_runtime_worker():
         }
         save_persistent_state(base_state)
 
-        # Fresh verification chain under 3.8.0. Raw settings and binary remain ephemeral.
+        # Fresh verification chain under 3.9.0. Raw settings and binary remain ephemeral.
         settings = _execution_settings_material(identity)
         verified_identity = _validate_persisted_mesh_identity(identity, settings)
         if verified_identity.get('state') != 'ready':
@@ -2314,7 +2437,7 @@ def persistent_runtime_worker():
         os.chmod(private, 0o700)
         prepared = _copy_persisted_identity_into_runtime(runtime_dir, identity, settings)
         if prepared.get('mode') != 'reuse':
-            raise RuntimeError('persistent_identity_reuse_required|Η 3.8.0 απαιτεί reuse της ήδη αποθηκευμένης MeshCentral identity και δεν επιτρέπεται seed νέου node.')
+            raise RuntimeError('persistent_identity_reuse_required|Η 3.9.0 απαιτεί reuse της ήδη αποθηκευμένης MeshCentral identity και δεν επιτρέπεται seed νέου node.')
         env = os.environ.copy(); env.update({'HOME':str(private),'TMPDIR':str(private),'XDG_CONFIG_HOME':str(private),'XDG_CACHE_HOME':str(private)})
 
         proc = _persistent_launch(runtime_dir, env)
@@ -2493,7 +2616,7 @@ def start_persistent_runtime():
             raise RuntimeError('persistent_not_paired|Απαιτείται ενεργή Managed identity.')
         status = get_mesh_identity_status(identity)
         if status.get('state') != 'ready':
-            raise RuntimeError('persistent_identity_not_ready|Η σταθερή MeshCentral identity δεν είναι READY. Δεν θα δημιουργηθεί νέο node από την 3.8.0.')
+            raise RuntimeError('persistent_identity_not_ready|Η σταθερή MeshCentral identity δεν είναι READY. Δεν θα δημιουργηθεί νέο node από την 3.9.0.')
         PERSISTENT_STOP_EVENT.clear()
         PERSISTENT_WORKER_ACTIVE = True
     thread = threading.Thread(target=persistent_runtime_worker, name='managed-continuous-runtime', daemon=True)
@@ -2827,12 +2950,15 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         plabel_node = persistent_state.get('agent_label') if pcurrent else (mesh_identity_status.get('agent_label') or '—')
         pclean = 'Ναι' if pcurrent and persistent_state.get('runtime_directory_deleted') else ('Όχι — runtime ενεργό' if PERSISTENT_WORKER_ACTIVE else '—')
         identity_ready = mesh_identity_status.get('state') == 'ready'
-        pstart_disabled = ' disabled' if (not overall or not identity_ready or PERSISTENT_WORKER_ACTIVE or CANARY_WORKER_ACTIVE) else ''
-        pstop_disabled = '' if PERSISTENT_WORKER_ACTIVE else ' disabled'
+        unattended = load_unattended_control()
+        unattended_enabled = unattended.get('enabled') is True
+        unattended_text = 'ENABLED — επανεκκινεί αυτόματα μετά από add-on restart' if unattended_enabled else 'DISABLED — απαιτείται ρητή ενεργοποίηση'
+        pstart_disabled = ' disabled' if (not overall or not identity_ready or unattended_enabled or PERSISTENT_WORKER_ACTIVE or CANARY_WORKER_ACTIVE) else ''
+        pstop_disabled = '' if (unattended_enabled or PERSISTENT_WORKER_ACTIVE) else ' disabled'
         persistent_html = f"""
 <section class="pairbox">
-<h2>Continuous Managed runtime — πρώτο live checkpoint</h2>
-<p>Χρησιμοποιεί <strong>αποκλειστικά την ήδη σταθερή MeshCentral identity</strong>, ανανεώνει βραχύβια runtime leases, ελέγχει συνεχώς τον Broker και αναφέρει health. Όσο οι άδειες παραμένουν έγκυρες, το ίδιο node μπορεί να μένει online χωρίς χρονικό canary limit. Αν χαθεί local policy, subscription/server authorization ή runtime lease, σταματά fail-closed. Στην 3.8.0 η πρώτη εκκίνηση παραμένει <strong>χειροκίνητη για ελεγχόμενο live QA</strong>· δεν ξεκινά MeshAgent μόνο και μόνο επειδή έγινε update.</p>
+<h2>Unattended Managed runtime — restart recovery checkpoint</h2>
+<p>Χρησιμοποιεί <strong>αποκλειστικά την ήδη σταθερή MeshCentral identity</strong>, ανανεώνει βραχύβια runtime leases, ελέγχει συνεχώς τον Broker και αναφέρει health. Όσο οι άδειες παραμένουν έγκυρες, το ίδιο node μπορεί να μένει online χωρίς χρονικό canary limit. Αν χαθεί local policy, subscription/server authorization ή runtime lease, σταματά fail-closed. Στην 3.9.0 το unattended mode παραμένει <strong>DISABLED μετά το update</strong>. Ενεργοποιείται μία φορά από εδώ και τότε, μετά από add-on/Home Assistant restart, περιμένει έγκυρη local + server authorization και επαναφέρει αυτόματα την ίδια σταθερή συσκευή. Η παύση απενεργοποιεί αυτή την αυτόματη επαναφορά.</p>
 <div class="mini-grid">
 <div><span>Κατάσταση</span><strong>{esc(plabel)}</strong></div>
 <div><span>Έναρξη</span><strong>{esc(pstart)}</strong></div>
@@ -2846,17 +2972,18 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <div><span>Lease renewals</span><strong>{esc(prenewals)}</strong></div>
 <div><span>Controlled reconnects</span><strong>{esc(preconnects)}</strong></div>
 <div><span>Identity mode</span><strong>reuse only</strong></div>
+<div><span>Unattended mode</span><strong>{esc(unattended_text)}</strong></div>
 <div><span>Runtime cleanup</span><strong>{esc(pclean)}</strong></div>
 <div><span>Technician actions</span><strong>NOT AUTHORIZED</strong></div>
 <div><span>Agent/service persistence</span><strong>OFF</strong></div>
 </div>
 <form method="post" action="continuous-runtime-start">
 <input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
-<button type="submit"{pstart_disabled}>Έναρξη continuous Managed runtime</button>
+<button type="submit"{pstart_disabled}>Ενεργοποίηση unattended Managed runtime</button>
 </form>
 <form method="post" action="continuous-runtime-stop">
 <input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
-<button type="submit"{pstop_disabled}>Τερματισμός continuous Managed runtime</button>
+<button type="submit"{pstop_disabled}>Παύση unattended Managed runtime</button>
 </form>
 </section>"""
 
@@ -2866,7 +2993,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <style>
 :root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;background:#10151d;color:#eef5ff;font:14px/1.5 Arial,Helvetica,sans-serif}}main{{max-width:1000px;margin:0 auto;padding:24px}}.hero{{background:#172231;border:1px solid #2c4158;border-radius:16px;padding:22px;margin-bottom:16px}}h1{{margin:0 0 5px;font-size:27px}}h2{{margin:0 0 10px;font-size:18px}}.sub{{color:#aab9ca}}.badge{{display:inline-block;margin-top:14px;padding:8px 12px;border-radius:999px;font-weight:700}}.ok{{background:#173a2a;color:#9ff0bd;border:1px solid #2c7750}}.bad{{background:#442128;color:#ffb5c0;border:1px solid #8c3d4d}}.warn{{background:#43381a;color:#ffe49a;border:1px solid #8b7331}}.note{{margin-top:15px;padding:13px 15px;border-radius:10px;background:#12293a;border:1px solid #245473;color:#cfeeff}}.notice{{margin:0 0 16px;padding:12px 14px;border-radius:10px}}.notice-ok{{background:#173a2a;border:1px solid #2c7750;color:#bdf7d0}}.notice-bad{{background:#442128;border:1px solid #8c3d4d;color:#ffd0d6}}.notice-info{{background:#12293a;border:1px solid #245473;color:#cfeeff}}.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.card,.pairbox{{background:#171d26;border:1px solid #293646;border-radius:12px;padding:15px}}.k{{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:#8fa1b5}}.v{{font-size:15px;font-weight:700;margin-top:4px;overflow-wrap:anywhere}}.pairbox{{margin:16px 0}}.pairbox p{{color:#b7c5d5}}label{{display:block;font-weight:700;margin:12px 0 6px}}input{{width:100%;max-width:460px;padding:11px 12px;border-radius:8px;border:1px solid #3b4c60;background:#0f151d;color:#fff;font:inherit}}button{{display:block;margin-top:12px;border:0;border-radius:8px;padding:10px 14px;background:#19aee8;color:#06131b;font-weight:800;cursor:pointer}}button:disabled,input:disabled{{opacity:.5;cursor:not-allowed}}code{{color:#9fdfff}}.mini-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.mini-grid div{{background:#111821;border:1px solid #28384a;border-radius:9px;padding:10px}}.mini-grid span{{display:block;color:#8fa1b5;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}}.mini-grid strong{{overflow-wrap:anywhere}}.footer{{margin-top:18px;color:#7f91a6;font-size:12px}}@media(max-width:650px){{main{{padding:14px}}.grid,.mini-grid{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.8.0 · Continuous Foreground Runtime Consumer · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
+<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.9.0 · Unattended Restart Recovery Consumer · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
 {notice_html}
 {pair_html}
 {enrollment_html}
@@ -2890,12 +3017,12 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <div class="card"><div class="k">MeshCentral stable identity</div><div class="v">{esc(mesh_identity_label)} · generation {esc(mesh_identity_generation)} · runs {esc(mesh_identity_runs)} · DB {esc(mesh_identity_db_hint)} · {esc(mesh_identity_updated)}</div></div>
 <div class="card"><div class="k">Remote access</div><div class="v">Όχι — το node μπορεί να είναι online, αλλά web/Terminal/Files technician actions παραμένουν NOT AUTHORIZED</div></div>
 </section>
-<div class="footer">3.8.0 continuous foreground runtime consumer. Η εκκίνηση είναι χειροκίνητη μόνο για το πρώτο live QA checkpoint. Ο MeshAgent παραμένει foreground, χωρίς -install/service persistence. Η online παρουσία του node δεν εξουσιοδοτεί web/Terminal/Files/Desktop.</div>
+<div class="footer">3.9.0 unattended restart recovery consumer. Η αυτόματη επαναφορά ενεργοποιείται μόνο μετά από ρητή επιλογή admin. Ο MeshAgent παραμένει foreground, χωρίς -install/service persistence. Η online παρουσία του node δεν εξουσιοδοτεί web/Terminal/Files/Desktop.</div>
 </main></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SmartProManaged/3.8.0"
+    server_version = "SmartProManaged/3.9.0"
 
     def _send(self, code, body, content_type):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
@@ -2951,6 +3078,7 @@ class Handler(BaseHTTPRequestHandler):
                 "continuous_runtime_health": load_persistent_state().get("health_state") or "",
                 "continuous_runtime_lease_renewals": load_persistent_state().get("lease_renewals") or 0,
                 "continuous_runtime_reconnects": load_persistent_state().get("reconnect_count") or 0,
+                "unattended_runtime_enabled": bool(load_unattended_control().get("enabled")),
                 "technician_actions_authorized": False,
                 "installation_id": policy.get("installation_id") or server.get("installation_id"),
             }
@@ -3047,20 +3175,26 @@ class Handler(BaseHTTPRequestHandler):
 
         if is_persistent_start:
             try:
+                save_unattended_control(True, 'admin_enabled')
                 start_persistent_runtime()
-                self._send(202, render_page(read_policy(), "Η continuous Managed λειτουργία ξεκίνησε στο παρασκήνιο. Παρατηρήστε στο MeshCentral ότι ενεργοποιείται η ΙΔΙΑ σταθερή συσκευή. Μην ανοίξετε web/Terminal/Files· technician actions παραμένουν κλειστά. Κάντε refresh εδώ μετά από περίπου 60–90 δευτερόλεπτα.", "info"), "text/html; charset=utf-8")
+                self._send(202, render_page(read_policy(), "Το unattended Managed runtime ενεργοποιήθηκε και ξεκίνησε με την ΙΔΙΑ σταθερή συσκευή. Από εδώ και πέρα το add-on μπορεί να το επαναφέρει αυτόματα μετά από restart, μόνο όταν local policy και Broker authorization είναι έγκυρα. Technician actions παραμένουν κλειστά.", "info"), "text/html; charset=utf-8")
             except RuntimeError as exc:
-                message = str(exc).partition('|')[2] or "Δεν ήταν δυνατή η εκκίνηση της continuous Managed λειτουργίας."
+                save_unattended_control(False, 'enable_start_failed')
+                message = str(exc).partition('|')[2] or "Δεν ήταν δυνατή η ενεργοποίηση του unattended Managed runtime."
                 self._send(409, render_page(read_policy(), message, "bad"), "text/html; charset=utf-8")
             return
 
         if is_persistent_stop:
-            try:
-                stop_persistent_runtime()
-                self._send(202, render_page(read_policy(), "Ζητήθηκε ασφαλής τερματισμός της continuous Managed λειτουργίας. Περιμένετε λίγα δευτερόλεπτα και κάντε refresh για το τελικό report/cleanup.", "info"), "text/html; charset=utf-8")
-            except RuntimeError as exc:
-                message = str(exc).partition('|')[2] or "Δεν υπάρχει ενεργή continuous Managed λειτουργία."
-                self._send(409, render_page(read_policy(), message, "bad"), "text/html; charset=utf-8")
+            save_unattended_control(False, 'admin_paused')
+            if PERSISTENT_WORKER_ACTIVE:
+                try:
+                    stop_persistent_runtime()
+                    self._send(202, render_page(read_policy(), "Το unattended mode απενεργοποιήθηκε και ζητήθηκε ασφαλής τερματισμός του ενεργού runtime. Δεν θα επανεκκινήσει αυτόματα μέχρι νέα ρητή ενεργοποίηση.", "info"), "text/html; charset=utf-8")
+                except RuntimeError as exc:
+                    message = str(exc).partition('|')[2] or "Δεν ήταν δυνατή η παύση του unattended Managed runtime."
+                    self._send(409, render_page(read_policy(), message, "bad"), "text/html; charset=utf-8")
+            else:
+                self._send(200, render_page(read_policy(), "Το unattended mode είναι πλέον απενεργοποιημένο. Δεν υπήρχε ενεργό runtime για τερματισμό.", "ok"), "text/html; charset=utf-8")
             return
 
         if is_canary:
@@ -3119,9 +3253,12 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"[managed] Smart Pro Managed Support {VERSION} continuous foreground runtime consumer listening on {PORT}", flush=True)
+    print(f"[managed] Smart Pro Managed Support {VERSION} unattended restart recovery consumer listening on {PORT}", flush=True)
     boot_identity = get_mesh_identity_status(load_identity())
-    print(f"[managed] mesh identity state={boot_identity.get('state')} generation={boot_identity.get('generation', 0)} continuity_runs={boot_identity.get('continuity_runs', 0)}; continuous runtime does not auto-start in 3.8.0 QA checkpoint", flush=True)
+    boot_control = load_unattended_control()
+    print(f"[managed] mesh identity state={boot_identity.get('state')} generation={boot_identity.get('generation', 0)} continuity_runs={boot_identity.get('continuity_runs', 0)}; unattended_enabled={str(bool(boot_control.get('enabled'))).lower()}", flush=True)
     thread = threading.Thread(target=heartbeat_worker, name="managed-heartbeat", daemon=True)
     thread.start()
+    unattended_thread = threading.Thread(target=unattended_supervisor, name="managed-unattended-supervisor", daemon=True)
+    unattended_thread.start()
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

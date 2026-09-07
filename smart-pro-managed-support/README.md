@@ -1,8 +1,8 @@
-# Smart Pro Managed Support 3.8.0
+# Smart Pro Managed Support 3.9.0
 
-## Continuous Foreground Runtime Consumer — first live checkpoint
+## Unattended Restart Recovery Consumer — restart recovery checkpoint
 
-Η 3.8.0 είναι το πρώτο client στάδιο μετά το live PASS της σταθερής MeshCentral identity στην 3.7.0 και απαιτεί Broker 0.32.0+.
+Η 3.9.0 είναι το πρώτο client στάδιο μετά το live PASS της σταθερής MeshCentral identity στην 3.7.0 και απαιτεί Broker 0.32.0+.
 
 - Χρησιμοποιεί μόνο υπάρχουσα VERIFIED σταθερή `meshagent.db` identity. Δεν κάνει seed νέας identity.
 - Κάνει fresh enrollment/settings/agent verification πριν από start.

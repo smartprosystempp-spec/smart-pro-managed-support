@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.9.0 — Unattended Restart Recovery Consumer
+- Adds explicit admin enable/pause state for unattended Managed runtime.
+- Update alone remains safe: unattended mode defaults OFF when no prior 3.9 control file exists.
+- After explicit enable, add-on restart waits for local policy + Broker server authorization and then automatically recovers the same stable MeshCentral identity.
+- Respects Broker 0.32.0 stale-runtime recovery window before a restart recovery attempt.
+- Backs off after failed starts and disables unattended mode on identity-integrity failures pending manual review.
+- No identity seed, no -install/service persistence, no technician actions.
+
+
 ## 3.8.0 — Continuous Foreground Runtime Consumer
 - Requires already-proven stable MeshAgent identity from 3.7.0; seed is forbidden.
 - Consumes Broker 0.32.0 persistent-runtime contract.

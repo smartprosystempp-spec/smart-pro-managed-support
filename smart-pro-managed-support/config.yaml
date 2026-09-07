@@ -1,6 +1,6 @@
 name: "Smart Pro Managed Support"
-description: "Continuous Foreground Runtime Consumer. Επαναχρησιμοποιεί την αποδεδειγμένα σταθερή MeshCentral identity, ανανεώνει runtime lease, κάνει continuous server watch/health και controlled reconnect, χωρίς -install/service persistence και χωρίς technician actions."
-version: "3.8.0"
+description: "Unattended Restart Recovery Consumer. Ενεργοποιείται ρητά από admin και μετά επαναφέρει αυτόματα την ίδια σταθερή MeshCentral identity μετά από add-on restart, με renewable lease, server watch/health και fail-closed policy, χωρίς -install/service persistence ή technician actions."
+version: "3.9.0"
 slug: "smart_pro_managed_support"
 arch:
   - aarch64
