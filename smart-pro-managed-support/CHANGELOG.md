@@ -1,5 +1,17 @@
 # Changelog
 
+## 3.7.0 — Stable MeshAgent Identity Canary
+
+- Adds a protected persistent MeshAgent identity store under private `/data`.
+- Persists only `meshagent.db` plus non-secret binding/integrity metadata; binary, `.msh`, leases and one-time tokens remain ephemeral.
+- First successful canary seeds a stable identity; later canaries must reuse it.
+- Runtime hardening adds `skipmaccheck=1` so container MAC changes do not rotate the MeshAgent NodeID.
+- Stored identity is bound to Installation ID, Broker Managed node ID, architecture, opaque `SPMNG-*` label and hash of critical verified `.msh` fields.
+- Database file is regular-file checked, size-bounded, mode 0600 and SHA-256 verified before reuse.
+- Partial, mismatched or tampered persistent state fails closed before MeshAgent launch to avoid silent duplicate-node creation.
+- Runtime remains foreground, hard <=45s, no `-install`, no service persistence and technician actions remain NOT AUTHORIZED.
+- Broker stays 0.31.0; no re-pairing required.
+
 ## 3.6.2 — Strict Canary Runtime Boundary Hotfix
 
 - Διορθώνει live QA εύρημα όπου το τελικό elapsed εμφανίστηκε 48s / 45s.

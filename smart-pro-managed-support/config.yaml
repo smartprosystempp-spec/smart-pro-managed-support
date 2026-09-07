@@ -1,6 +1,6 @@
 name: "Smart Pro Managed Support"
-description: "Foreground MeshAgent Connectivity Canary. Εκτελεί μόνο χειροκίνητο, server-authorized foreground canary έως 45s χωρίς -install/service persistence και χωρίς technician actions."
-version: "3.6.2"
+description: "Stable MeshAgent Identity Canary. Διατηρεί ελεγχόμενα το meshagent.db ώστε η ίδια εγκατάσταση να επαναχρησιμοποιεί το ίδιο MeshCentral node, χωρίς -install/service persistence και χωρίς technician actions."
+version: "3.7.0"
 slug: "smart_pro_managed_support"
 arch:
   - aarch64

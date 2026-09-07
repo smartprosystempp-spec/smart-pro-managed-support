@@ -21,7 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.6.2")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.7.0")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -35,7 +35,10 @@ ENROLLMENT_STATE_FILE = DATA_DIR / "enrollment-authorization.json"
 SETTINGS_STATE_FILE = DATA_DIR / "settings-verification.json"
 AGENT_STATE_FILE = DATA_DIR / "agent-binary-verification.json"
 RUNTIME_STATE_FILE = DATA_DIR / "runtime-lease-dry-run.json"
-CANARY_STATE_FILE = DATA_DIR / "connectivity-canary.json"
+CANARY_STATE_FILE = DATA_DIR / "identity-continuity-canary.json"
+MESH_IDENTITY_DIR = DATA_DIR / "meshagent-identity"
+MESH_IDENTITY_DB_FILE = MESH_IDENTITY_DIR / "meshagent.db"
+MESH_IDENTITY_META_FILE = MESH_IDENTITY_DIR / "identity-meta.json"
 EXPECTED_CONTRACT = "smart-pro-managed-policy-v1"
 EXPECTED_POLICY_VERSION = 1
 EXPECTED_SERVER_AUTH_VERSION = 1
@@ -48,6 +51,8 @@ RUNTIME_RENEW_DELAY = 70
 CANARY_LOCAL_MAX_RUNTIME = 45
 CANARY_SHUTDOWN_GRACE = 3
 CANARY_POLL_FALLBACK = 5
+MAX_MESH_IDENTITY_DB_BYTES = 16 * 1024 * 1024
+MESH_IDENTITY_BINDING_KEYS = ("MeshName", "MeshType", "MeshID", "ServerID", "MeshServer", "agentName")
 NODE_ID_RE = re.compile(r"^SPMN-[A-F0-9]{32}$")
 NODE_SECRET_RE = re.compile(r"^SPMS-[A-Za-z0-9_-]{43}$")
 BOOTSTRAP_TICKET_RE = re.compile(r"^SPMB-[A-Za-z0-9_-]{43}$")
@@ -1213,10 +1218,10 @@ def _runtime_dry_run_failure(exc, identity=None, started_at=0):
 
 
 def runtime_lease_dry_run_worker():
-    """Refresh the full 3.6.0 verification chain, issue one lease and renew it once.
+    """Refresh the full current Managed verification chain, issue one lease and renew it once.
 
     The raw SPMRL lease exists only in this worker's local memory. It is never
-    persisted, rendered or logged. 3.6.0 never executes MeshAgent.
+    persisted, rendered or logged. This dry-run never executes MeshAgent.
     """
     global RUNTIME_WORKER_ACTIVE
     started_at = now_ts()
@@ -1243,7 +1248,7 @@ def runtime_lease_dry_run_worker():
             "architecture": ARCH,
         })
 
-        # This refreshes enrollment + secure settings under 3.6.0, verifies the
+        # This refreshes enrollment + secure settings under the current Managed version, verifies the
         # MeshAgent twice, and deletes the temporary binary before any lease call.
         agent = verify_agent_binary()
         if agent.get("client_version") != VERSION or agent.get("architecture") != ARCH:
@@ -1389,6 +1394,13 @@ def save_canary_state(state):
         "architecture": _safe_str(state.get("architecture"), 20),
         "runtime_directory_deleted": state.get("runtime_directory_deleted") is True,
         "technician_actions_authorized": False,
+        "identity_mode": _safe_str(state.get("identity_mode"), 20),
+        "identity_db_persisted": state.get("identity_db_persisted") is True,
+        "identity_binding_verified": state.get("identity_binding_verified") is True,
+        "identity_db_sha256_hint": _safe_str(state.get("identity_db_sha256_hint"), 12).lower(),
+        "identity_generation": max(0, _as_int(state.get("identity_generation")) or 0),
+        "identity_continuity_runs": max(0, _as_int(state.get("identity_continuity_runs")) or 0),
+        "identity_relative_path": _safe_str(state.get("identity_relative_path"), 200),
     }
     tmp = CANARY_STATE_FILE.with_suffix('.tmp')
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -1429,11 +1441,18 @@ def load_canary_state():
         'architecture': _safe_str(data.get('architecture'), 20),
         'runtime_directory_deleted': data.get('runtime_directory_deleted') is True,
         'technician_actions_authorized': False,
+        'identity_mode': _safe_str(data.get('identity_mode'), 20),
+        'identity_db_persisted': data.get('identity_db_persisted') is True,
+        'identity_binding_verified': data.get('identity_binding_verified') is True,
+        'identity_db_sha256_hint': _safe_str(data.get('identity_db_sha256_hint'), 12).lower(),
+        'identity_generation': max(0, _as_int(data.get('identity_generation')) or 0),
+        'identity_continuity_runs': max(0, _as_int(data.get('identity_continuity_runs')) or 0),
+        'identity_relative_path': _safe_str(data.get('identity_relative_path'), 200),
     }
 
 
 def _execution_settings_material(identity):
-    """Fresh 3.6.0 enrollment + secure-settings consume, returning raw .msh only in memory."""
+    """Fresh Managed 3.x enrollment + secure-settings consume, returning raw .msh only in memory."""
     enrollment = verify_enrollment_authorization()
     common = {'node_id': identity['node_id'], 'node_secret': identity['node_secret'], 'client_version': VERSION, 'architecture': ARCH}
     req = broker_post('/managed/settings/request', common)
@@ -1458,7 +1477,7 @@ def _execution_settings_material(identity):
         and AGENT_LABEL_RE.fullmatch(agent_label) is not None
         and expires_at > now_ts() and server_until > now_ts() and expires_at <= server_until
     )
-    if not ok: raise RuntimeError('canary_settings_request_invalid|Ο Broker επέστρεψε μη έγκυρο secure settings contract για το connectivity canary.')
+    if not ok: raise RuntimeError('canary_settings_request_invalid|Ο Broker επέστρεψε μη έγκυρο secure settings contract για το identity continuity canary.')
     payload = dict(common); payload['settings_ticket'] = ticket
     data = broker_post('/managed/settings/consume', payload)
     settings = data.get('settings') if isinstance(data.get('settings'), dict) else {}
@@ -1477,7 +1496,7 @@ def _execution_settings_material(identity):
         and SHA256_RE.fullmatch(response_sha) is not None and secrets.compare_digest(expected_sha,response_sha)
         and response_bytes == expected_bytes and response_label == agent_label and consumed_at > 0 and consume_server_until > now_ts()
     )
-    if not ok: raise RuntimeError('canary_settings_consume_invalid|Η κατανάλωση secure settings για το connectivity canary απέτυχε.')
+    if not ok: raise RuntimeError('canary_settings_consume_invalid|Η κατανάλωση secure settings για το identity continuity canary απέτυχε.')
     try: raw = base64.b64decode(encoded.encode('ascii'), validate=True)
     except (UnicodeEncodeError,binascii.Error,ValueError): raise RuntimeError('canary_settings_base64_invalid|Το runtime .msh payload δεν είναι έγκυρο base64.') from None
     sha = hashlib.sha256(raw).hexdigest()
@@ -1497,7 +1516,7 @@ def _execution_settings_material(identity):
 
 
 def _execution_agent_material(identity, settings_material):
-    """Consume one 3.6.0 agent ticket and keep the verified 0600 temp binary until canary cleanup."""
+    """Consume one Managed 3.x agent ticket and keep the verified 0600 temp binary until canary cleanup."""
     common = {'node_id': identity['node_id'], 'node_secret': identity['node_secret'], 'client_version': VERSION, 'architecture': ARCH}
     req = broker_post('/managed/agent-binary/request', common)
     ticket = _safe_str(req.get('agent_ticket'),80); expected_sha = _safe_str(req.get('expected_sha256'),80).lower()
@@ -1512,7 +1531,7 @@ def _execution_agent_material(identity, settings_material):
         and SHA256_RE.fullmatch(expected_sha) is not None and MIN_AGENT_BYTES <= expected_bytes <= MAX_AGENT_BYTES
         and expires_at > now_ts() and server_until > now_ts() and expires_at <= server_until
     )
-    if not ok: raise RuntimeError('canary_agent_request_invalid|Ο Broker επέστρεψε μη έγκυρο MeshAgent contract για το connectivity canary.')
+    if not ok: raise RuntimeError('canary_agent_request_invalid|Ο Broker επέστρεψε μη έγκυρο MeshAgent contract για το identity continuity canary.')
     payload = dict(common); payload['agent_ticket'] = ticket
     result = broker_binary_post('/managed/agent-binary/consume', payload, expected_bytes)
     path = result.get('path')
@@ -1542,13 +1561,13 @@ def _harden_runtime_msh(raw, expected_label):
     except UnicodeDecodeError: raise RuntimeError('canary_msh_encoding_invalid|Το runtime .msh δεν είναι έγκυρο UTF-8.') from None
     original = parse_msh_strict(raw)
     critical = {k: original.get(k) for k in ('MeshName','MeshType','MeshID','ServerID','MeshServer','agentName')}
-    drop = {'forceUpdate','fakeUpdate','coreDumpEnabled','disableUpdate','noUpdateCoreModule'}
+    drop = {'forceUpdate','fakeUpdate','coreDumpEnabled','disableUpdate','noUpdateCoreModule','skipmaccheck'}
     lines=[]
     for line in text.splitlines():
         key = line.split('=',1)[0].strip() if '=' in line else ''
         if key in drop: continue
         lines.append(line)
-    lines += ['disableUpdate=1','noUpdateCoreModule=1']
+    lines += ['disableUpdate=1','noUpdateCoreModule=1','skipmaccheck=1']
     hardened = ('\n'.join(lines).rstrip('\n')+'\n').encode('utf-8')
     parsed = parse_msh_strict(hardened)
     for key,value in critical.items():
@@ -1599,6 +1618,292 @@ def _terminate_process_group_before(proc, hard_stop_monotonic):
         except subprocess.TimeoutExpired: pass
 
 
+
+def _mesh_identity_binding_hash(identity, settings_material):
+    fields = settings_material.get('fields') if isinstance(settings_material, dict) else None
+    if not isinstance(fields, dict):
+        raise RuntimeError('mesh_identity_settings_missing|Λείπουν τα verified MeshCentral settings για τον έλεγχο σταθερής ταυτότητας.')
+    payload = {
+        'installation_id': _safe_str(identity.get('installation_id'), 100).upper(),
+        'broker_node_id': _safe_str(identity.get('node_id'), 64).upper(),
+        'architecture': ARCH,
+    }
+    for key in MESH_IDENTITY_BINDING_KEYS:
+        payload[key] = _safe_str(fields.get(key), 2048)
+    label = _safe_str(payload.get('agentName'), 40).upper()
+    if not AGENT_LABEL_RE.fullmatch(label):
+        raise RuntimeError('mesh_identity_label_invalid|Το verified .msh δεν περιέχει έγκυρο Managed node label για identity continuity.')
+    payload['agentName'] = label
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _open_regular_nofollow(path, max_bytes):
+    path = Path(path)
+    try:
+        lst = os.lstat(path)
+    except FileNotFoundError:
+        raise RuntimeError('mesh_identity_db_missing|Δεν βρέθηκε το αποθηκευμένο MeshAgent identity database.') from None
+    except OSError as exc:
+        raise RuntimeError('mesh_identity_db_unreadable|Δεν ήταν δυνατός ο έλεγχος του MeshAgent identity database.') from exc
+    if stat.S_ISLNK(lst.st_mode) or not stat.S_ISREG(lst.st_mode):
+        raise RuntimeError('mesh_identity_db_type_invalid|Το MeshAgent identity database δεν είναι κανονικό αρχείο.')
+    if lst.st_size <= 0 or lst.st_size > max_bytes:
+        raise RuntimeError('mesh_identity_db_size_invalid|Το MeshAgent identity database έχει μη αποδεκτό μέγεθος.')
+    flags = os.O_RDONLY
+    if hasattr(os, 'O_NOFOLLOW'):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise RuntimeError('mesh_identity_db_open_failed|Δεν ήταν δυνατό να ανοιχτεί με ασφάλεια το MeshAgent identity database.') from exc
+    try:
+        fst = os.fstat(fd)
+        if not stat.S_ISREG(fst.st_mode) or fst.st_ino != lst.st_ino or fst.st_dev != lst.st_dev:
+            raise RuntimeError('mesh_identity_db_race_detected|Το MeshAgent identity database άλλαξε κατά τον ασφαλή έλεγχο.')
+        if stat.S_IMODE(fst.st_mode) & 0o077:
+            raise RuntimeError('mesh_identity_db_permissions_invalid|Τα δικαιώματα του MeshAgent identity database δεν είναι αρκετά αυστηρά.')
+        return fd, fst.st_size
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _sha256_fd(fd, max_bytes):
+    digest = hashlib.sha256(); total = 0
+    os.lseek(fd, 0, os.SEEK_SET)
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk: break
+        total += len(chunk)
+        if total > max_bytes:
+            raise RuntimeError('mesh_identity_db_size_invalid|Το MeshAgent identity database ξεπέρασε το μέγιστο επιτρεπόμενο μέγεθος.')
+        digest.update(chunk)
+    os.lseek(fd, 0, os.SEEK_SET)
+    return digest.hexdigest(), total
+
+
+def _secure_identity_dir():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        if MESH_IDENTITY_DIR.exists() or MESH_IDENTITY_DIR.is_symlink():
+            lst = os.lstat(MESH_IDENTITY_DIR)
+            if stat.S_ISLNK(lst.st_mode) or not stat.S_ISDIR(lst.st_mode):
+                raise RuntimeError('mesh_identity_dir_invalid|Ο χώρος αποθήκευσης MeshAgent identity δεν είναι ασφαλής κατάλογος.')
+        else:
+            MESH_IDENTITY_DIR.mkdir(mode=0o700)
+        os.chmod(MESH_IDENTITY_DIR, 0o700)
+    except RuntimeError:
+        raise
+    except OSError as exc:
+        raise RuntimeError('mesh_identity_dir_unavailable|Δεν ήταν δυνατή η ασφαλής προετοιμασία του χώρου MeshAgent identity.') from exc
+
+
+def _read_mesh_identity_meta():
+    if not MESH_IDENTITY_META_FILE.exists():
+        return None
+    try:
+        lst = os.lstat(MESH_IDENTITY_META_FILE)
+        if stat.S_ISLNK(lst.st_mode) or not stat.S_ISREG(lst.st_mode) or lst.st_size <= 0 or lst.st_size > 16384:
+            raise RuntimeError('mesh_identity_meta_invalid|Το metadata της σταθερής MeshAgent ταυτότητας δεν είναι έγκυρο.')
+        if stat.S_IMODE(lst.st_mode) & 0o077:
+            raise RuntimeError('mesh_identity_meta_permissions_invalid|Τα δικαιώματα του identity metadata δεν είναι αρκετά αυστηρά.')
+        data = json.loads(MESH_IDENTITY_META_FILE.read_text(encoding='utf-8'))
+    except RuntimeError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError('mesh_identity_meta_unreadable|Δεν ήταν δυνατή η ασφαλής ανάγνωση του MeshAgent identity metadata.') from exc
+    if not isinstance(data, dict):
+        raise RuntimeError('mesh_identity_meta_invalid|Το MeshAgent identity metadata δεν έχει έγκυρη μορφή.')
+    return data
+
+
+def _validate_persisted_mesh_identity(identity, settings_material=None):
+    db_exists = MESH_IDENTITY_DB_FILE.exists() or MESH_IDENTITY_DB_FILE.is_symlink()
+    meta_exists = MESH_IDENTITY_META_FILE.exists() or MESH_IDENTITY_META_FILE.is_symlink()
+    if not db_exists and not meta_exists:
+        return {'state':'not_seeded','generation':0}
+    if db_exists != meta_exists:
+        raise RuntimeError('mesh_identity_partial_state|Η σταθερή MeshAgent ταυτότητα είναι ελλιπής. Η εκτέλεση μπλοκαρίστηκε για να μη δημιουργηθεί duplicate node.')
+    meta = _read_mesh_identity_meta()
+    installation_id = _safe_str(meta.get('installation_id'),100).upper()
+    node_id = _safe_str(meta.get('broker_node_id'),64).upper()
+    architecture = _safe_str(meta.get('architecture'),20)
+    agent_label = _safe_str(meta.get('agent_label'),40).upper()
+    db_sha = _safe_str(meta.get('db_sha256'),80).lower()
+    binding_sha = _safe_str(meta.get('binding_sha256'),80).lower()
+    relative_path = _safe_str(meta.get('runtime_relative_path'),200)
+    generation = max(1,_as_int(meta.get('generation')) or 1)
+    continuity_runs = max(0,_as_int(meta.get('continuity_runs')) or 0)
+    if installation_id != identity['installation_id'] or node_id != identity['node_id'] or architecture != ARCH:
+        raise RuntimeError('mesh_identity_owner_mismatch|Η αποθηκευμένη MeshAgent ταυτότητα ανήκει σε διαφορετική εγκατάσταση/Managed identity. Η εκτέλεση μπλοκαρίστηκε.')
+    if not AGENT_LABEL_RE.fullmatch(agent_label) or not SHA256_RE.fullmatch(db_sha) or not SHA256_RE.fullmatch(binding_sha):
+        raise RuntimeError('mesh_identity_meta_binding_invalid|Το MeshAgent identity metadata δεν περιέχει έγκυρα bindings.')
+    rel = Path(relative_path)
+    if not relative_path or rel.is_absolute() or '..' in rel.parts or rel.name != 'meshagent.db':
+        raise RuntimeError('mesh_identity_runtime_path_invalid|Η αποθηκευμένη θέση του MeshAgent identity database δεν είναι έγκυρη.')
+    fd,size = _open_regular_nofollow(MESH_IDENTITY_DB_FILE,MAX_MESH_IDENTITY_DB_BYTES)
+    try:
+        actual_sha,actual_size = _sha256_fd(fd,MAX_MESH_IDENTITY_DB_BYTES)
+    finally:
+        os.close(fd)
+    if actual_size != (_as_int(meta.get('db_bytes')) or 0) or not secrets.compare_digest(actual_sha,db_sha):
+        raise RuntimeError('mesh_identity_db_integrity_mismatch|Το αποθηκευμένο MeshAgent identity database απέτυχε στον έλεγχο ακεραιότητας. Η εκτέλεση μπλοκαρίστηκε.')
+    if settings_material is not None:
+        current_binding = _mesh_identity_binding_hash(identity,settings_material)
+        current_label = _safe_str(settings_material.get('agent_label'),40).upper()
+        if not secrets.compare_digest(current_binding,binding_sha) or not secrets.compare_digest(current_label,agent_label):
+            raise RuntimeError('mesh_identity_msh_binding_mismatch|Τα νέα verified MeshCentral settings δεν ταιριάζουν με την αποθηκευμένη σταθερή ταυτότητα. Η εκτέλεση μπλοκαρίστηκε για αποφυγή duplicate node.')
+    return {'state':'ready','generation':generation,'agent_label':agent_label,'db_sha256':actual_sha,'db_bytes':actual_size,
+            'binding_sha256':binding_sha,'runtime_relative_path':relative_path,'seeded_at':_as_int(meta.get('seeded_at')) or 0,
+            'updated_at':_as_int(meta.get('updated_at')) or 0,'continuity_runs':continuity_runs}
+
+
+def _copy_persisted_identity_into_runtime(runtime_dir, identity, settings_material):
+    state = _validate_persisted_mesh_identity(identity,settings_material)
+    if state.get('state') == 'not_seeded':
+        return {'mode':'seed','generation':0,'continuity_runs':0,'runtime_relative_path':''}
+    rel = Path(state['runtime_relative_path'])
+    target = Path(runtime_dir) / rel
+    target.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+    os.chmod(target.parent,0o700)
+    fd,size = _open_regular_nofollow(MESH_IDENTITY_DB_FILE,MAX_MESH_IDENTITY_DB_BYTES)
+    tmp = target.with_name(target.name + '.identity-copy.tmp')
+    try:
+        outfd = os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+        try:
+            total=0; digest=hashlib.sha256()
+            while True:
+                chunk=os.read(fd,65536)
+                if not chunk: break
+                total += len(chunk)
+                if total > MAX_MESH_IDENTITY_DB_BYTES:
+                    raise RuntimeError('mesh_identity_db_size_invalid|Το MeshAgent identity database ξεπέρασε το επιτρεπόμενο μέγεθος κατά το runtime copy.')
+                view=memoryview(chunk)
+                while view:
+                    written=os.write(outfd,view)
+                    if written <= 0:
+                        raise RuntimeError('mesh_identity_runtime_copy_write_failed|Απέτυχε η ασφαλής εγγραφή του runtime MeshAgent identity database.')
+                    view=view[written:]
+                digest.update(chunk)
+            os.fsync(outfd)
+        finally:
+            os.close(outfd)
+        if total != size or not secrets.compare_digest(digest.hexdigest(),state['db_sha256']):
+            raise RuntimeError('mesh_identity_runtime_copy_mismatch|Το runtime αντίγραφο του MeshAgent identity database απέτυχε στον έλεγχο ακεραιότητας.')
+        os.replace(tmp,target); os.chmod(target,0o600)
+    finally:
+        os.close(fd)
+        try:
+            if tmp.exists(): tmp.unlink()
+        except OSError: pass
+    return {'mode':'reuse','generation':state['generation'],'continuity_runs':state.get('continuity_runs',0),'runtime_relative_path':str(rel),'db_sha256':state['db_sha256']}
+
+
+def _find_runtime_mesh_identity_db(runtime_dir):
+    root = Path(runtime_dir).resolve()
+    found=[]
+    try:
+        for path in Path(runtime_dir).rglob('meshagent.db'):
+            try:
+                resolved=path.resolve()
+                if root not in resolved.parents and resolved != root:
+                    continue
+                lst=os.lstat(path)
+                if stat.S_ISLNK(lst.st_mode) or not stat.S_ISREG(lst.st_mode):
+                    continue
+                if 0 < lst.st_size <= MAX_MESH_IDENTITY_DB_BYTES:
+                    found.append(path)
+            except OSError:
+                continue
+    except OSError as exc:
+        raise RuntimeError('mesh_identity_runtime_scan_failed|Δεν ήταν δυνατός ο έλεγχος του runtime MeshAgent identity database.') from exc
+    if len(found) != 1:
+        code='mesh_identity_runtime_db_missing' if not found else 'mesh_identity_runtime_db_ambiguous'
+        message='Δεν δημιουργήθηκε MeshAgent identity database στο ιδιωτικό runtime.' if not found else 'Βρέθηκαν πολλαπλά MeshAgent identity databases και η συνέχεια ταυτότητας μπλοκαρίστηκε.'
+        raise RuntimeError(f'{code}|{message}')
+    rel=found[0].resolve().relative_to(root)
+    return found[0],str(rel)
+
+
+def _persist_runtime_mesh_identity(runtime_dir, identity, settings_material, prior):
+    db_path,relative_path=_find_runtime_mesh_identity_db(runtime_dir)
+    fd,size=_open_regular_nofollow(db_path,MAX_MESH_IDENTITY_DB_BYTES)
+    try:
+        db_sha,db_bytes=_sha256_fd(fd,MAX_MESH_IDENTITY_DB_BYTES)
+        _secure_identity_dir()
+        tmp_db=MESH_IDENTITY_DIR / ('.meshagent.db.' + secrets.token_hex(6) + '.tmp')
+        outfd=os.open(tmp_db,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+        try:
+            total=0
+            while True:
+                chunk=os.read(fd,65536)
+                if not chunk: break
+                total += len(chunk)
+                view=memoryview(chunk)
+                while view:
+                    written=os.write(outfd,view)
+                    if written <= 0:
+                        raise RuntimeError('mesh_identity_persist_write_failed|Απέτυχε η ασφαλής αποθήκευση του MeshAgent identity database.')
+                    view=view[written:]
+            os.fsync(outfd)
+        finally:
+            os.close(outfd)
+        if total != db_bytes:
+            raise RuntimeError('mesh_identity_persist_copy_short|Δεν αντιγράφηκε ολόκληρο το MeshAgent identity database.')
+        os.replace(tmp_db,MESH_IDENTITY_DB_FILE); os.chmod(MESH_IDENTITY_DB_FILE,0o600)
+    finally:
+        os.close(fd)
+        try:
+            if 'tmp_db' in locals() and tmp_db.exists(): tmp_db.unlink()
+        except OSError: pass
+    previous_meta=None
+    try: previous_meta=_read_mesh_identity_meta()
+    except RuntimeError: previous_meta=None
+    seeded_at=(_as_int((previous_meta or {}).get('seeded_at')) or now_ts())
+    generation=max(1,_as_int((previous_meta or {}).get('generation')) or _as_int((prior or {}).get('generation')) or 1)
+    continuity_runs=max(0,_as_int((previous_meta or {}).get('continuity_runs')) or _as_int((prior or {}).get('continuity_runs')) or 0)+1
+    binding_sha=_mesh_identity_binding_hash(identity,settings_material)
+    meta={
+        'schema_version':1,'installation_id':identity['installation_id'],'broker_node_id':identity['node_id'],'architecture':ARCH,
+        'agent_label':_safe_str(settings_material.get('agent_label'),40).upper(),'binding_sha256':binding_sha,
+        'db_sha256':db_sha,'db_bytes':db_bytes,'runtime_relative_path':relative_path,'seeded_at':seeded_at,'updated_at':now_ts(),
+        'generation':generation,'continuity_runs':continuity_runs,'service_persistence':False,'technician_actions_authorized':False,
+    }
+    tmp_meta=MESH_IDENTITY_DIR / ('.identity-meta.' + secrets.token_hex(6) + '.tmp')
+    fd_meta=os.open(tmp_meta,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+    try:
+        with os.fdopen(fd_meta,'w',encoding='utf-8') as handle:
+            handle.write(json.dumps(meta,ensure_ascii=False,separators=(',',':'))); handle.flush(); os.fsync(handle.fileno())
+        os.replace(tmp_meta,MESH_IDENTITY_META_FILE); os.chmod(MESH_IDENTITY_META_FILE,0o600)
+        try:
+            dirfd=os.open(MESH_IDENTITY_DIR,os.O_RDONLY)
+            try: os.fsync(dirfd)
+            finally: os.close(dirfd)
+        except OSError: pass
+    finally:
+        try:
+            if tmp_meta.exists(): tmp_meta.unlink()
+        except OSError: pass
+    check=_validate_persisted_mesh_identity(identity,settings_material)
+    return {'generation':check['generation'],'continuity_runs':check.get('continuity_runs',0),'db_sha256':check['db_sha256'],'runtime_relative_path':check['runtime_relative_path'],'seeded_at':check['seeded_at']}
+
+
+def get_mesh_identity_status(identity):
+    if identity is None:
+        return {'state':'unpaired','label':'Απαιτείται Managed pairing'}
+    try:
+        state=_validate_persisted_mesh_identity(identity,None)
+        if state.get('state') == 'not_seeded':
+            return {'state':'not_seeded','label':'Δεν έχει αποθηκευτεί ακόμη σταθερή MeshCentral ταυτότητα','generation':0}
+        return {'state':'ready','label':'READY — υπάρχει αποθηκευμένη σταθερή MeshCentral ταυτότητα','generation':state.get('generation',0),
+                'agent_label':state.get('agent_label',''),'db_sha256_hint':state.get('db_sha256','')[:12],
+                'updated_at':state.get('updated_at',0),'runtime_relative_path':state.get('runtime_relative_path',''),'continuity_runs':state.get('continuity_runs',0)}
+    except RuntimeError as exc:
+        code,_,message=str(exc).partition('|')
+        return {'state':'blocked','label':'BLOCKED — '+(message or code),'generation':0}
+
+
 def _report_canary(identity, report_token, result_code, elapsed):
     try:
         data = broker_post('/managed/execution-canary/report', {
@@ -1612,17 +1917,24 @@ def _report_canary(identity, report_token, result_code, elapsed):
 def connectivity_canary_worker():
     global CANARY_WORKER_ACTIVE
     identity = load_identity(); runtime_dir=None; agent_temp=None; proc=None; report_token=''; result='launch_failed'; started=now_ts()
-    max_runtime=0; agent_label=''; cleanup_ok=True
+    max_runtime=0; agent_label=''; cleanup_ok=True; identity_mode=''; identity_db_persisted=False; identity_binding_verified=False
+    identity_db_sha256_hint=''; identity_generation=0; identity_continuity_runs=0; identity_relative_path=''; settings=None; prior_identity={}
     try:
-        if identity is None: raise RuntimeError('not_paired|Απαιτείται ενεργή Managed identity πριν από το connectivity canary.')
-        if not read_policy().get('allowed_local'): raise RuntimeError('local_policy_denied|Η τοπική Managed πολιτική δεν επιτρέπει connectivity canary.')
+        if identity is None: raise RuntimeError('not_paired|Απαιτείται ενεργή Managed identity πριν από το identity continuity canary.')
+        if not read_policy().get('allowed_local'): raise RuntimeError('local_policy_denied|Η τοπική Managed πολιτική δεν επιτρέπει identity continuity canary.')
         server=get_server_state(); server_until=_as_int(server.get('valid_until')) or 0
         if server.get('authorized_server') is not True or server_until <= now_ts():
-            raise RuntimeError('server_authorization_required|Απαιτείται ενεργό Broker Server Authorization πριν από το connectivity canary.')
+            raise RuntimeError('server_authorization_required|Απαιτείται ενεργό Broker Server Authorization πριν από το identity continuity canary.')
         save_canary_state({'status':'preparing','verified':False,'started_at':started,'installation_id':identity['installation_id'],
             'node_id':identity['node_id'],'client_version':VERSION,'architecture':ARCH})
 
         settings = _execution_settings_material(identity); agent_label=settings['agent_label']
+        prior_identity=_validate_persisted_mesh_identity(identity,settings)
+        identity_mode='seed' if prior_identity.get('state') == 'not_seeded' else 'reuse'
+        identity_binding_verified=prior_identity.get('state') == 'ready'
+        identity_generation=max(0,_as_int(prior_identity.get('generation')) or 0)
+        identity_continuity_runs=max(0,_as_int(prior_identity.get('continuity_runs')) or 0)
+        identity_relative_path=_safe_str(prior_identity.get('runtime_relative_path'),200)
         agent = _execution_agent_material(identity, settings); agent_temp=agent['path']
         common={'node_id':identity['node_id'],'node_secret':identity['node_secret'],'client_version':VERSION,'architecture':ARCH}
         lease=broker_post('/managed/runtime-lease/request', common); lease_token=_safe_str(lease.get('runtime_lease'),90)
@@ -1630,7 +1942,7 @@ def connectivity_canary_worker():
         if not (lease.get('success') is True and lease.get('runtime_contract')=='smart-pro-managed-runtime-lease-v1'
                 and lease.get('runtime_authorized') is True and lease.get('execution') is False and RUNTIME_LEASE_RE.fullmatch(lease_token)
                 and lease_exp>now_ts()):
-            raise RuntimeError('canary_runtime_lease_invalid|Δεν εκδόθηκε έγκυρο runtime lease για το canary.')
+            raise RuntimeError('canary_runtime_lease_invalid|Δεν εκδόθηκε έγκυρο runtime lease για το identity continuity canary.')
         can_req=dict(common); can_req['runtime_lease']=lease_token
         auth=broker_post('/managed/execution-canary/request', can_req)
         canary_ticket=_safe_str(auth.get('canary_ticket'),90); report_token=_safe_str(auth.get('report_token'),90)
@@ -1640,7 +1952,7 @@ def connectivity_canary_worker():
                 and auth.get('install') is False and auth.get('service_persistence') is False
                 and auth.get('technician_actions_authorized') is False and CANARY_TICKET_RE.fullmatch(canary_ticket)
                 and CANARY_REPORT_RE.fullmatch(report_token) and 1 <= max_runtime <= CANARY_LOCAL_MAX_RUNTIME):
-            raise RuntimeError('canary_authorization_invalid|Ο Broker δεν επέστρεψε έγκυρη connectivity-canary authorization.')
+            raise RuntimeError('canary_authorization_invalid|Ο Broker δεν επέστρεψε έγκυρη identity-continuity canary authorization.')
         consume=dict(common); consume['canary_ticket']=canary_ticket
         run=broker_post('/managed/execution-canary/consume',consume)
         hard_deadline=parse_iso_epoch(run.get('hard_deadline')); watch_interval=_as_int(run.get('watch_interval_seconds')) or CANARY_POLL_FALLBACK
@@ -1649,19 +1961,27 @@ def connectivity_canary_worker():
                 and run.get('install') is False and run.get('service_persistence') is False
                 and run.get('meshcentral_connectivity_canary') is True and run.get('technician_actions_authorized') is False
                 and 1 <= (_as_int(run.get('max_runtime_seconds')) or 0) <= CANARY_LOCAL_MAX_RUNTIME and hard_deadline>now_ts()):
-            raise RuntimeError('canary_consume_invalid|Η execution-canary authorization δεν καταναλώθηκε σωστά.')
+            raise RuntimeError('canary_consume_invalid|Η identity-continuity canary authorization δεν καταναλώθηκε σωστά.')
         max_runtime=min(max_runtime,_as_int(run.get('max_runtime_seconds')) or max_runtime)
 
-        runtime_dir=Path(tempfile.mkdtemp(prefix='smart-pro-managed-canary-',dir='/tmp')); os.chmod(runtime_dir,0o700)
+        runtime_dir=Path(tempfile.mkdtemp(prefix='smart-pro-managed-identity-canary-',dir='/tmp')); os.chmod(runtime_dir,0o700)
         agent_path=runtime_dir/'meshagent'; shutil.move(agent_temp,agent_path); agent_temp=None; os.chmod(agent_path,0o700)
         msh_path=runtime_dir/'meshagent.msh'; hardened=_harden_runtime_msh(settings['raw'],agent_label)
         fd=os.open(msh_path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
         with os.fdopen(fd,'wb') as h: h.write(hardened); h.flush(); os.fsync(h.fileno())
         private=runtime_dir/'private'; private.mkdir(mode=0o700)
+        prepared=_copy_persisted_identity_into_runtime(runtime_dir,identity,settings)
+        identity_mode=prepared.get('mode') or identity_mode
+        identity_generation=max(identity_generation,_as_int(prepared.get('generation')) or 0)
+        identity_continuity_runs=max(identity_continuity_runs,_as_int(prepared.get('continuity_runs')) or 0)
+        identity_relative_path=_safe_str(prepared.get('runtime_relative_path'),200)
+        identity_binding_verified=identity_mode == 'reuse'
         env=os.environ.copy(); env.update({'HOME':str(private),'TMPDIR':str(private),'XDG_CONFIG_HOME':str(private),'XDG_CACHE_HOME':str(private)})
         process_started_at=now_ts()
         save_canary_state({'status':'running','verified':False,'started_at':process_started_at,'max_runtime_seconds':max_runtime,'agent_label':agent_label,
-            'installation_id':identity['installation_id'],'node_id':identity['node_id'],'client_version':VERSION,'architecture':ARCH})
+            'installation_id':identity['installation_id'],'node_id':identity['node_id'],'client_version':VERSION,'architecture':ARCH,
+            'identity_mode':identity_mode,'identity_db_persisted':False,'identity_binding_verified':identity_binding_verified,
+            'identity_generation':identity_generation,'identity_continuity_runs':identity_continuity_runs,'identity_relative_path':identity_relative_path})
         proc=subprocess.Popen(['setsid','./meshagent'],cwd=str(runtime_dir),stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
                               env=env,close_fds=True)
         run_started=time.monotonic(); result='runtime_limit'
@@ -1687,20 +2007,32 @@ def connectivity_canary_worker():
             time.sleep(min(max(1,min(10,watch_interval)),remaining))
         _terminate_process_group_before(proc,hard_stop_monotonic)
         elapsed=int(time.monotonic()-run_started)
+        persisted=_persist_runtime_mesh_identity(runtime_dir,identity,settings,prior_identity)
+        identity_db_persisted=True; identity_binding_verified=True
+        identity_db_sha256_hint=_safe_str(persisted.get('db_sha256'),80)[:12]
+        identity_generation=max(1,_as_int(persisted.get('generation')) or 1)
+        identity_continuity_runs=max(1,_as_int(persisted.get('continuity_runs')) or 1)
+        identity_relative_path=_safe_str(persisted.get('runtime_relative_path'),200)
         report_ok=_report_canary(identity,report_token,result,elapsed)
         save_canary_state({'status':'reported' if report_ok else 'failed','verified':report_ok,'started_at':process_started_at,'ended_at':now_ts(),
             'result_code':result,'elapsed_seconds':elapsed,'max_runtime_seconds':max_runtime,'agent_label':agent_label,
             'installation_id':identity['installation_id'],'node_id':identity['node_id'],'client_version':VERSION,'architecture':ARCH,
-            'runtime_directory_deleted':False})
+            'runtime_directory_deleted':False,'identity_mode':identity_mode,'identity_db_persisted':identity_db_persisted,
+            'identity_binding_verified':identity_binding_verified,'identity_db_sha256_hint':identity_db_sha256_hint,
+            'identity_generation':identity_generation,'identity_continuity_runs':identity_continuity_runs,'identity_relative_path':identity_relative_path})
+        print(f"[managed] identity continuity canary mode={identity_mode} generation={identity_generation} continuity_runs={identity_continuity_runs} persisted=true db_hint={identity_db_sha256_hint}; technician_actions=false",flush=True)
     except (RuntimeError,OSError,subprocess.SubprocessError) as exc:
         if proc is not None: _terminate_process_group(proc)
         elapsed=max(0,now_ts()-started)
-        if report_token: _report_canary(identity,report_token,'launch_failed',elapsed)
-        code,msg=(str(exc).split('|',1)+[''])[:2] if '|' in str(exc) else ('canary_failed',str(exc))
+        text=str(exc); code,msg=(text.split('|',1)+[''])[:2] if '|' in text else ('canary_failed',text)
+        broker_result='cleanup_failed' if code.startswith('mesh_identity_') and report_token else 'launch_failed'
+        if report_token: _report_canary(identity,report_token,broker_result,elapsed)
         save_canary_state({'status':'failed','verified':False,'started_at':started,'ended_at':now_ts(),'result_code':code,'elapsed_seconds':elapsed,
             'max_runtime_seconds':max_runtime,'agent_label':agent_label,'installation_id':(identity or {}).get('installation_id',''),
-            'node_id':(identity or {}).get('node_id',''),'client_version':VERSION,'architecture':ARCH,'runtime_directory_deleted':False})
-        print(f"[managed] connectivity canary failed code={code}; no raw credentials/tokens logged",flush=True)
+            'node_id':(identity or {}).get('node_id',''),'client_version':VERSION,'architecture':ARCH,'runtime_directory_deleted':False,
+            'identity_mode':identity_mode,'identity_db_persisted':identity_db_persisted,'identity_binding_verified':identity_binding_verified,
+            'identity_db_sha256_hint':identity_db_sha256_hint,'identity_generation':identity_generation,'identity_continuity_runs':identity_continuity_runs,'identity_relative_path':identity_relative_path})
+        print(f"[managed] identity continuity canary failed code={code}; no raw credentials/tokens logged",flush=True)
     finally:
         if proc is not None: _terminate_process_group(proc)
         if agent_temp:
@@ -1715,13 +2047,12 @@ def connectivity_canary_worker():
             save_canary_state(state)
         with CANARY_WORKER_LOCK: CANARY_WORKER_ACTIVE=False
 
-
 def start_connectivity_canary():
     global CANARY_WORKER_ACTIVE
     with CANARY_WORKER_LOCK:
-        if CANARY_WORKER_ACTIVE: raise RuntimeError('canary_already_running|Υπάρχει ήδη connectivity canary σε εξέλιξη.')
+        if CANARY_WORKER_ACTIVE: raise RuntimeError('canary_already_running|Υπάρχει ήδη identity continuity canary σε εξέλιξη.')
         CANARY_WORKER_ACTIVE=True
-    t=threading.Thread(target=connectivity_canary_worker,name='managed-connectivity-canary',daemon=True); t.start()
+    t=threading.Thread(target=connectivity_canary_worker,name='managed-identity-continuity-canary',daemon=True); t.start()
 
 def heartbeat_worker():
     last_summary = None
@@ -1821,7 +2152,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         )
         enrollment_current = enrollment_verified and enrollment.get("client_version") == VERSION and enrollment.get("architecture") == ARCH
         if enrollment_current:
-            enrollment_label = "VERIFIED — τρέχον 3.6.0 enrollment consume"
+            enrollment_label = "VERIFIED — τρέχον Managed enrollment consume"
         elif enrollment_verified:
             enrollment_label = f"Προηγούμενο VERIFIED ({enrollment.get('client_version') or 'άγνωστη έκδοση'}) — θα ανανεωθεί αυτόματα"
         else:
@@ -1851,7 +2182,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         )
         settings_verified = settings_any_verified and settings_state.get("client_version") == VERSION and settings_state.get("architecture") == ARCH
         if settings_verified:
-            settings_label = "VERIFIED — τρέχον 3.6.0 .msh verification"
+            settings_label = f"VERIFIED — τρέχον {VERSION} .msh verification"
         elif settings_any_verified:
             settings_label = f"Προηγούμενο VERIFIED ({settings_state.get('client_version') or 'άγνωστη έκδοση'}) — θα ανανεωθεί αυτόματα"
         else:
@@ -1864,7 +2195,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         settings_html = f"""
 <section class="pairbox">
 <h2>Secure settings verification</h2>
-<p>Εκτελεί νέο enrollment authorization για την 3.6.0 και μετά ζητά/καταναλώνει ακριβώς ένα one-time secure settings ticket. Το raw ticket και το <strong>.msh δεν αποθηκεύονται</strong>. Ελέγχονται integrity, required fields, ασφαλές WSS endpoint και opaque node label.</p>
+<p>Εκτελεί νέο enrollment authorization για την τρέχουσα Managed έκδοση και μετά ζητά/καταναλώνει ακριβώς ένα one-time secure settings ticket. Το raw ticket και το <strong>.msh δεν αποθηκεύονται</strong>. Ελέγχονται integrity, required fields, ασφαλές WSS endpoint και opaque node label.</p>
 <div class="mini-grid">
 <div><span>Κατάσταση</span><strong>{esc(settings_label)}</strong></div>
 <div><span>Τελευταίος έλεγχος</span><strong>{esc(settings_time)}</strong></div>
@@ -1896,7 +2227,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         agent_html = f"""
 <section class="pairbox">
 <h2>MeshAgent binary verification</h2>
-<p>Ανανεώνει αυτόματα enrollment + secure settings για την 3.6.0 και μετά ζητά/καταναλώνει ακριβώς ένα one-time MeshAgent binary ticket. Το binary γράφεται μόνο προσωρινά με mode 0600, ελέγχεται SHA/bytes/ELF64/architecture δεύτερη φορά από disk και <strong>διαγράφεται αμέσως</strong>. Δεν γίνεται chmod +x ή execution.</p>
+<p>Ανανεώνει αυτόματα enrollment + secure settings για την τρέχουσα Managed έκδοση και μετά ζητά/καταναλώνει ακριβώς ένα one-time MeshAgent binary ticket. Το binary γράφεται μόνο προσωρινά με mode 0600, ελέγχεται SHA/bytes/ELF64/architecture δεύτερη φορά από disk και <strong>διαγράφεται αμέσως</strong>. Δεν γίνεται chmod +x ή execution.</p>
 <div class="mini-grid">
 <div><span>Κατάσταση</span><strong>{esc(agent_label)}</strong></div>
 <div><span>Τελευταίος έλεγχος</span><strong>{esc(agent_time)}</strong></div>
@@ -1921,7 +2252,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         )
         runtime_status = runtime_state.get("status") if runtime_same_identity else "not_run"
         if runtime_status == "refreshing_chain":
-            runtime_label = "RUNNING — ανανεώνεται η αλυσίδα 3.6.0"
+            runtime_label = "RUNNING — ανανεώνεται η Managed αλυσίδα"
         elif runtime_status == "lease_issued_waiting_renewal":
             runtime_label = "RUNNING — lease εκδόθηκε, αναμένεται μία ανανέωση"
         elif runtime_status == "verified_renewed_once" and runtime_state.get("verified") is True:
@@ -1938,7 +2269,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         runtime_html = f"""
 <section class="pairbox">
 <h2>Runtime lease dry-run</h2>
-<p>Ανανεώνει αυτόματα enrollment + secure settings + MeshAgent verification για την 3.6.0, ζητά ένα βραχύβιο server-authoritative runtime lease και το ανανεώνει <strong>μία φορά</strong> μετά από περίπου {RUNTIME_RENEW_DELAY} δευτερόλεπτα. Το raw lease μένει μόνο στη μνήμη και απορρίπτεται μετά τον έλεγχο. <strong>Δεν εκτελείται MeshAgent</strong> και δεν ανοίγει MeshCentral/remote access.</p>
+<p>Ανανεώνει αυτόματα enrollment + secure settings + MeshAgent verification για την τρέχουσα Managed έκδοση, ζητά ένα βραχύβιο server-authoritative runtime lease και το ανανεώνει <strong>μία φορά</strong> μετά από περίπου {RUNTIME_RENEW_DELAY} δευτερόλεπτα. Το raw lease μένει μόνο στη μνήμη και απορρίπτεται μετά τον έλεγχο. <strong>Δεν εκτελείται MeshAgent</strong> και δεν ανοίγει MeshCentral/remote access.</p>
 <div class="mini-grid">
 <div><span>Κατάσταση</span><strong>{esc(runtime_label)}</strong></div>
 <div><span>Lease εκδόθηκε</span><strong>{esc(runtime_requested)}</strong></div>
@@ -1955,13 +2286,20 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
     else:
         runtime_html = ""
 
+    mesh_identity_status = get_mesh_identity_status(identity)
+    mesh_identity_label = mesh_identity_status.get('label') or '—'
+    mesh_identity_generation = str(mesh_identity_status.get('generation') or 0) if identity is not None else '—'
+    mesh_identity_db_hint = mesh_identity_status.get('db_sha256_hint') or '—'
+    mesh_identity_runs = str(mesh_identity_status.get('continuity_runs') or 0) if identity is not None else '—'
+    mesh_identity_updated = fmt_epoch(mesh_identity_status.get('updated_at')) if mesh_identity_status.get('updated_at') else '—'
+
     if identity is not None:
         canary_current = (
             canary_state.get('client_version') == VERSION and canary_state.get('architecture') == ARCH
             and canary_state.get('installation_id') == identity['installation_id'] and canary_state.get('node_id') == identity['node_id']
         )
         cstatus = canary_state.get('status') if canary_current else 'not_run'
-        if cstatus == 'running': canary_label = 'RUNNING — connectivity-only foreground canary'
+        if cstatus == 'running': canary_label = 'RUNNING — identity-continuity foreground canary'
         elif cstatus == 'preparing': canary_label = 'PREPARING — ανανεώνεται verified chain / authorization'
         elif cstatus == 'reported' and canary_state.get('verified'): canary_label = 'VERIFIED — canary ολοκληρώθηκε και αναφέρθηκε'
         elif cstatus == 'failed': canary_label = 'FAILED — ελέγξτε το αποτέλεσμα πριν επανάληψη'
@@ -1973,11 +2311,16 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         cmax = str(canary_state.get('max_runtime_seconds')) if canary_current and canary_state.get('max_runtime_seconds') else '≤45'
         clabel = canary_state.get('agent_label') if canary_current else '—'
         cclean = 'Ναι' if canary_current and canary_state.get('runtime_directory_deleted') else ('Σε εξέλιξη' if cstatus in {'preparing','running'} else '—')
+        cid_mode = canary_state.get('identity_mode') if canary_current else '—'
+        cid_persisted = 'Ναι' if canary_current and canary_state.get('identity_db_persisted') else ('Σε εξέλιξη' if cstatus in {'preparing','running'} else '—')
+        cid_binding = 'Ναι' if canary_current and canary_state.get('identity_binding_verified') else ('Θα δημιουργηθεί' if canary_current and cid_mode == 'seed' else '—')
+        cid_generation = str(canary_state.get('identity_generation') or 0) if canary_current else '—'
+        cid_runs = str(canary_state.get('identity_continuity_runs') or 0) if canary_current else '—'
         canary_disabled = ' disabled' if (not overall or CANARY_WORKER_ACTIVE) else ''
         canary_html = f"""
 <section class="pairbox">
-<h2>MeshAgent connectivity canary</h2>
-<p>Εκτελεί την πλήρη verified αλυσίδα της 3.6.1, αποκτά runtime lease + one-time execution canary και ξεκινά <strong>μόνο foreground MeshAgent connectivity</strong> για έως 45″. Δεν χρησιμοποιείται <code>-install</code>, δεν δημιουργείται service και <strong>δεν εξουσιοδοτούνται Desktop / Terminal / Files</strong>. Το private runtime directory διαγράφεται στο τέλος.</p>
+<h2>MeshAgent identity continuity canary</h2>
+<p>Εκτελεί την πλήρη verified αλυσίδα της 3.7.0 και foreground MeshAgent έως 45″. Στην πρώτη επιτυχή εκτέλεση αποθηκεύει μόνο το προστατευμένο <code>meshagent.db</code> της MeshCentral ταυτότητας. Στις επόμενες εκτελέσεις απαιτεί να ταιριάζει με το ίδιο Installation ID, Broker identity και verified .msh ώστε να επαναχρησιμοποιείται το ίδιο MeshCentral node. Δεν χρησιμοποιείται <code>-install</code>, δεν δημιουργείται service και <strong>δεν εξουσιοδοτούνται Desktop / Terminal / Files</strong>.</p>
 <div class="mini-grid">
 <div><span>Κατάσταση</span><strong>{esc(canary_label)}</strong></div>
 <div><span>Έναρξη</span><strong>{esc(cstart)}</strong></div>
@@ -1986,12 +2329,17 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <div><span>Elapsed / Max</span><strong>{esc(celapsed)}s / {esc(cmax)}s</strong></div>
 <div><span>Expected node</span><strong>{esc(clabel)}</strong></div>
 <div><span>Runtime cleanup</span><strong>{esc(cclean)}</strong></div>
+<div><span>Identity mode</span><strong>{esc(cid_mode)}</strong></div>
+<div><span>Identity DB persisted</span><strong>{esc(cid_persisted)}</strong></div>
+<div><span>Identity binding verified</span><strong>{esc(cid_binding)}</strong></div>
+<div><span>Identity generation</span><strong>{esc(cid_generation)}</strong></div>
+<div><span>Continuity runs</span><strong>{esc(cid_runs)}</strong></div>
 <div><span>Technician actions</span><strong>NOT AUTHORIZED</strong></div>
-<div><span>Persistence</span><strong>OFF</strong></div>
+<div><span>Agent/service persistence</span><strong>OFF</strong></div>
 </div>
-<form method="post" action="connectivity-canary">
+<form method="post" action="identity-continuity-canary">
 <input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
-<button type="submit"{canary_disabled}>Έναρξη connectivity canary ≤45″</button>
+<button type="submit"{canary_disabled}>Έναρξη identity continuity canary ≤45″</button>
 </form>
 </section>"""
 
@@ -2001,7 +2349,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <style>
 :root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;background:#10151d;color:#eef5ff;font:14px/1.5 Arial,Helvetica,sans-serif}}main{{max-width:1000px;margin:0 auto;padding:24px}}.hero{{background:#172231;border:1px solid #2c4158;border-radius:16px;padding:22px;margin-bottom:16px}}h1{{margin:0 0 5px;font-size:27px}}h2{{margin:0 0 10px;font-size:18px}}.sub{{color:#aab9ca}}.badge{{display:inline-block;margin-top:14px;padding:8px 12px;border-radius:999px;font-weight:700}}.ok{{background:#173a2a;color:#9ff0bd;border:1px solid #2c7750}}.bad{{background:#442128;color:#ffb5c0;border:1px solid #8c3d4d}}.warn{{background:#43381a;color:#ffe49a;border:1px solid #8b7331}}.note{{margin-top:15px;padding:13px 15px;border-radius:10px;background:#12293a;border:1px solid #245473;color:#cfeeff}}.notice{{margin:0 0 16px;padding:12px 14px;border-radius:10px}}.notice-ok{{background:#173a2a;border:1px solid #2c7750;color:#bdf7d0}}.notice-bad{{background:#442128;border:1px solid #8c3d4d;color:#ffd0d6}}.notice-info{{background:#12293a;border:1px solid #245473;color:#cfeeff}}.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.card,.pairbox{{background:#171d26;border:1px solid #293646;border-radius:12px;padding:15px}}.k{{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:#8fa1b5}}.v{{font-size:15px;font-weight:700;margin-top:4px;overflow-wrap:anywhere}}.pairbox{{margin:16px 0}}.pairbox p{{color:#b7c5d5}}label{{display:block;font-weight:700;margin:12px 0 6px}}input{{width:100%;max-width:460px;padding:11px 12px;border-radius:8px;border:1px solid #3b4c60;background:#0f151d;color:#fff;font:inherit}}button{{display:block;margin-top:12px;border:0;border-radius:8px;padding:10px 14px;background:#19aee8;color:#06131b;font-weight:800;cursor:pointer}}button:disabled,input:disabled{{opacity:.5;cursor:not-allowed}}code{{color:#9fdfff}}.mini-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.mini-grid div{{background:#111821;border:1px solid #28384a;border-radius:9px;padding:10px}}.mini-grid span{{display:block;color:#8fa1b5;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}}.mini-grid strong{{overflow-wrap:anywhere}}.footer{{margin-top:18px;color:#7f91a6;font-size:12px}}@media(max-width:650px){{main{{padding:14px}}.grid,.mini-grid{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.6.1 · Foreground MeshAgent Connectivity Canary UI Hotfix · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
+<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.7.0 · Stable MeshAgent Identity Canary · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
 {notice_html}
 {pair_html}
 {enrollment_html}
@@ -2021,14 +2369,15 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <div class="card"><div class="k">Server lease έως</div><div class="v">{esc(fmt_epoch(server.get('valid_until')))}</div></div>
 <div class="card"><div class="k">Τελευταίο Broker heartbeat</div><div class="v">{esc(fmt_epoch(server.get('last_heartbeat_at')))}</div></div>
 <div class="card"><div class="k">Authorization chain</div><div class="v">{esc(overall_text)}</div></div>
-<div class="card"><div class="k">Remote access</div><div class="v">Όχι — technician actions δεν είναι εξουσιοδοτημένες (connectivity canary μόνο)</div></div>
+<div class="card"><div class="k">MeshCentral stable identity</div><div class="v">{esc(mesh_identity_label)} · generation {esc(mesh_identity_generation)} · runs {esc(mesh_identity_runs)} · DB {esc(mesh_identity_db_hint)} · {esc(mesh_identity_updated)}</div></div>
+<div class="card"><div class="k">Remote access</div><div class="v">Όχι — technician actions δεν είναι εξουσιοδοτημένες (identity continuity canary μόνο)</div></div>
 </section>
-<div class="footer">3.6.1 connectivity-canary client. Η κανονική λειτουργία παραμένει fail-closed. Μόνο το χειροκίνητο canary μπορεί να εκτελέσει foreground MeshAgent έως 45″, χωρίς -install/service persistence και χωρίς authorization για Desktop/Terminal/Files.</div>
+<div class="footer">3.7.0 stable-identity canary client. Η κανονική λειτουργία παραμένει fail-closed. Μόνο το χειροκίνητο canary μπορεί να εκτελέσει foreground MeshAgent έως 45″, χωρίς -install/service persistence και χωρίς authorization για Desktop/Terminal/Files.</div>
 </main></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SmartProManaged/3.6.1"
+    server_version = "SmartProManaged/3.7.0"
 
     def _send(self, code, body, content_type):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
@@ -2093,7 +2442,7 @@ class Handler(BaseHTTPRequestHandler):
         is_settings = path.endswith("/settings-check") or path == "settings-check"
         is_agent = path.endswith("/agent-check") or path == "agent-check"
         is_runtime = path.endswith("/runtime-lease-check") or path == "runtime-lease-check"
-        is_canary = path.endswith("/connectivity-canary") or path == "connectivity-canary"
+        is_canary = path.endswith("/identity-continuity-canary") or path == "identity-continuity-canary"
         if not is_pair and not is_enrollment and not is_settings and not is_agent and not is_runtime and not is_canary:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
@@ -2171,9 +2520,9 @@ class Handler(BaseHTTPRequestHandler):
         if is_canary:
             try:
                 start_connectivity_canary()
-                self._send(202, render_page(read_policy(), "Το connectivity canary ξεκίνησε. Ανοίξτε αμέσως το MeshCentral και παρατηρήστε μόνο αν εμφανίζεται το expected SPMNG node. Μην ανοίξετε Desktop/Terminal/Files. Κάντε refresh εδώ μετά από περίπου 50–60 δευτερόλεπτα.", "info"), "text/html; charset=utf-8")
+                self._send(202, render_page(read_policy(), "Το identity continuity canary ξεκίνησε. Παρατηρήστε μόνο το expected SPMNG node στο MeshCentral. Μην ανοίξετε Desktop/Terminal/Files. Κάντε refresh εδώ μετά από περίπου 50–60 δευτερόλεπτα.", "info"), "text/html; charset=utf-8")
             except RuntimeError as exc:
-                message = str(exc).partition('|')[2] or "Δεν ήταν δυνατή η εκκίνηση του connectivity canary."
+                message = str(exc).partition('|')[2] or "Δεν ήταν δυνατή η εκκίνηση του identity continuity canary."
                 self._send(409, render_page(read_policy(), message, "bad"), "text/html; charset=utf-8")
             return
 
@@ -2224,7 +2573,9 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"[managed] Smart Pro Managed Support {VERSION} foreground connectivity canary client listening on {PORT}", flush=True)
+    print(f"[managed] Smart Pro Managed Support {VERSION} stable MeshAgent identity canary client listening on {PORT}", flush=True)
+    boot_identity = get_mesh_identity_status(load_identity())
+    print(f"[managed] mesh identity state={boot_identity.get('state')} generation={boot_identity.get('generation', 0)} continuity_runs={boot_identity.get('continuity_runs', 0)}; no secret material logged", flush=True)
     thread = threading.Thread(target=heartbeat_worker, name="managed-heartbeat", daemon=True)
     thread.start()
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
