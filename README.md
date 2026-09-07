@@ -1,20 +1,21 @@
-# Smart Pro Managed Support Repository
+# Smart Pro Managed Support 3.5.0
 
-Ξεχωριστό Home Assistant repository για το συνδρομητικό **Smart Pro Managed Support**.
+## Agent Binary Verification Consumer
 
-Η σειρά 3.x είναι ανεξάρτητη από το Guest/Temporary repository και χρησιμοποιεί νέο slug `smart_pro_managed_support`.
+Η 3.5.0 είναι το επόμενο ελεγχόμενο βήμα μετά το verified 3.2.0 enrollment authorization.
 
-## 3.0.0 Foundation
+Ενεργά:
+- Smart Pro Tools Managed Policy Contract v1 (read-only),
+- Broker Managed identity + authenticated heartbeat,
+- Portal-backed Server Authorization Contract v1,
+- fresh one-time enrollment authorization bound to 3.5.0,
+- one-time Managed 3.x secure settings request/consume,
+- local verification του `.msh`: exact SHA-256, exact byte count, required MeshCentral fields, WSS endpoint και opaque `SPMNG-*` node label.
 
-Η 3.0.0 είναι **policy-consumer foundation μόνο**:
-
-- διαβάζει read-only το `/share/smart-pro-system/managed-policy.json` που παράγει το Smart Pro Tools 2.4.6+,
-- ελέγχει contract/version, Installation ID, authorization deadline και Tools liveness lease,
-- εμφανίζει την τοπική κατάσταση στο Ingress,
-- δεν επικοινωνεί ακόμη με Broker,
-- δεν παραλαμβάνει `.msh`,
-- δεν κατεβάζει/εκτελεί MeshAgent,
-- δεν δημιουργεί MeshCentral node,
-- δεν παρέχει remote access.
-
-Το επόμενο στάδιο θα προσθέσει ξεχωριστό server-side Managed authorization contract πριν ενεργοποιηθεί οποιοδήποτε runtime.
+Security boundary:
+- το raw settings ticket δεν αποθηκεύεται ούτε γράφεται σε log,
+- το raw `.msh` επαληθεύεται στη μνήμη και δεν αποθηκεύεται,
+- αποθηκεύονται μόνο non-secret verification metadata/hints,
+- δεν γίνεται MeshAgent download, chmod ή execution,
+- δεν δημιουργείται MeshCentral node,
+- remote access παραμένει OFF.
