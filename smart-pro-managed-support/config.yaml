@@ -1,6 +1,6 @@
 name: "Smart Pro Managed Support"
-description: "Agent Binary Verification Consumer. Παραλαμβάνει one-time επαληθευμένο MeshAgent binary μόνο για SHA/bytes/ELF/architecture verification και άμεση διαγραφή, χωρίς execution ή remote access στην 3.4.0."
-version: "3.4.0"
+description: "Runtime Lease Dry-Run Consumer. Ανανεώνει την verified Managed 3.x αλυσίδα, ζητά βραχύβιο renewable runtime lease και το ανανεώνει μία φορά χωρίς MeshAgent execution, MeshCentral runtime ή remote access στην 3.5.0."
+version: "3.5.0"
 slug: "smart_pro_managed_support"
 arch:
   - aarch64

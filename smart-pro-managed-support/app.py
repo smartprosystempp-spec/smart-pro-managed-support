@@ -18,7 +18,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.4.0")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.5.0")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -31,6 +31,7 @@ IDENTITY_FILE = DATA_DIR / "managed-identity.json"
 ENROLLMENT_STATE_FILE = DATA_DIR / "enrollment-authorization.json"
 SETTINGS_STATE_FILE = DATA_DIR / "settings-verification.json"
 AGENT_STATE_FILE = DATA_DIR / "agent-binary-verification.json"
+RUNTIME_STATE_FILE = DATA_DIR / "runtime-lease-dry-run.json"
 EXPECTED_CONTRACT = "smart-pro-managed-policy-v1"
 EXPECTED_POLICY_VERSION = 1
 EXPECTED_SERVER_AUTH_VERSION = 1
@@ -39,11 +40,13 @@ MAX_RESPONSE_BYTES = 131072
 MAX_POST_BYTES = 8192
 HEARTBEAT_INTERVAL = 60
 HTTP_TIMEOUT = 12
+RUNTIME_RENEW_DELAY = 70
 NODE_ID_RE = re.compile(r"^SPMN-[A-F0-9]{32}$")
 NODE_SECRET_RE = re.compile(r"^SPMS-[A-Za-z0-9_-]{43}$")
 BOOTSTRAP_TICKET_RE = re.compile(r"^SPMB-[A-Za-z0-9_-]{43}$")
 SETTINGS_TICKET_RE = re.compile(r"^SPMD-[A-Za-z0-9_-]{43}$")
 AGENT_TICKET_RE = re.compile(r"^SPMA-[A-Za-z0-9_-]{43}$")
+RUNTIME_LEASE_RE = re.compile(r"^SPMRL-[A-Za-z0-9_-]{43}$")
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 AGENT_LABEL_RE = re.compile(r"^SPMNG-[A-F0-9]{16}$")
 FINGERPRINT_HINT_RE = re.compile(r"^[a-f0-9]{12}$")
@@ -52,6 +55,8 @@ MAX_AGENT_BYTES = 67108864
 ELF_MACHINE = {"aarch64": 183, "amd64": 62}
 CSRF_TOKEN = secrets.token_urlsafe(24)
 STATE_LOCK = threading.RLock()
+RUNTIME_WORKER_LOCK = threading.Lock()
+RUNTIME_WORKER_ACTIVE = False
 SERVER_STATE = {
     "paired": False,
     "state": "unpaired",
@@ -1097,6 +1102,261 @@ def verify_agent_binary():
             except OSError:
                 pass
 
+
+def load_runtime_state():
+    try:
+        if not RUNTIME_STATE_FILE.exists():
+            return {}
+        if RUNTIME_STATE_FILE.stat().st_size <= 0 or RUNTIME_STATE_FILE.stat().st_size > 16384:
+            return {}
+        data = json.loads(RUNTIME_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    status = _safe_str(data.get("status"), 40)
+    if status not in {"not_run", "refreshing_chain", "lease_issued_waiting_renewal", "verified_renewed_once", "failed"}:
+        status = "not_run"
+    return {
+        "status": status,
+        "verified": data.get("verified") is True,
+        "started_at": _as_int(data.get("started_at")) or 0,
+        "requested_at": _as_int(data.get("requested_at")) or 0,
+        "initial_expires_at": _as_int(data.get("initial_expires_at")) or 0,
+        "renewed_at": _as_int(data.get("renewed_at")) or 0,
+        "renewed_expires_at": _as_int(data.get("renewed_expires_at")) or 0,
+        "server_valid_until": _as_int(data.get("server_valid_until")) or 0,
+        "error_code": _safe_str(data.get("error_code"), 100),
+        "error_message": _safe_str(data.get("error_message"), 300),
+        "installation_id": _safe_str(data.get("installation_id"), 100).upper(),
+        "node_id": _safe_str(data.get("node_id"), 64).upper(),
+        "client_version": _safe_str(data.get("client_version"), 30),
+        "architecture": _safe_str(data.get("architecture"), 20),
+        "token_persisted": False,
+        "execution": False,
+        "meshcentral_runtime": False,
+        "remote_access": False,
+    }
+
+
+def save_runtime_state(state):
+    """Persist only non-secret dry-run metadata; raw runtime lease is forbidden."""
+    safe = {
+        "status": _safe_str(state.get("status"), 40),
+        "verified": state.get("verified") is True,
+        "started_at": _as_int(state.get("started_at")) or 0,
+        "requested_at": _as_int(state.get("requested_at")) or 0,
+        "initial_expires_at": _as_int(state.get("initial_expires_at")) or 0,
+        "renewed_at": _as_int(state.get("renewed_at")) or 0,
+        "renewed_expires_at": _as_int(state.get("renewed_expires_at")) or 0,
+        "server_valid_until": _as_int(state.get("server_valid_until")) or 0,
+        "error_code": _safe_str(state.get("error_code"), 100),
+        "error_message": _safe_str(state.get("error_message"), 300),
+        "installation_id": _safe_str(state.get("installation_id"), 100).upper(),
+        "node_id": _safe_str(state.get("node_id"), 64).upper(),
+        "client_version": _safe_str(state.get("client_version"), 30),
+        "architecture": _safe_str(state.get("architecture"), 20),
+        "token_persisted": False,
+        "execution": False,
+        "meshcentral_runtime": False,
+        "remote_access": False,
+    }
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = RUNTIME_STATE_FILE.with_suffix(".tmp")
+    payload = json.dumps(safe, ensure_ascii=False, separators=(",", ":"))
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, RUNTIME_STATE_FILE)
+        os.chmod(RUNTIME_STATE_FILE, 0o600)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
+def _runtime_dry_run_failure(exc, identity=None, started_at=0):
+    text = str(exc)
+    code, sep, message = text.partition("|")
+    if not sep:
+        code = "runtime_dry_run_failed"
+        message = "Ο έλεγχος runtime lease απέτυχε."
+    state = {
+        "status": "failed",
+        "verified": False,
+        "started_at": started_at or now_ts(),
+        "error_code": _safe_str(code, 100),
+        "error_message": _safe_str(message, 300),
+        "installation_id": (identity or {}).get("installation_id", ""),
+        "node_id": (identity or {}).get("node_id", ""),
+        "client_version": VERSION,
+        "architecture": ARCH,
+    }
+    save_runtime_state(state)
+    print(f"[managed] runtime lease dry-run failed code={state['error_code']}; no lease token logged", flush=True)
+
+
+def runtime_lease_dry_run_worker():
+    """Refresh the full 3.5.0 verification chain, issue one lease and renew it once.
+
+    The raw SPMRL lease exists only in this worker's local memory. It is never
+    persisted, rendered or logged. 3.5.0 never executes MeshAgent.
+    """
+    global RUNTIME_WORKER_ACTIVE
+    started_at = now_ts()
+    identity = load_identity()
+    lease_token = ""
+    try:
+        if identity is None:
+            raise RuntimeError("not_paired|Απαιτείται ενεργή Managed identity πριν από το runtime lease dry-run.")
+        snapshot = read_policy()
+        if not snapshot.get("allowed_local"):
+            raise RuntimeError("local_policy_denied|Η τοπική Managed πολιτική δεν επιτρέπει runtime lease αυτή τη στιγμή.")
+        server = get_server_state()
+        server_valid_until = _as_int(server.get("valid_until")) or 0
+        if server.get("authorized_server") is not True or server_valid_until <= now_ts():
+            raise RuntimeError("server_authorization_required|Απαιτείται ενεργό Broker Server Authorization πριν από το runtime lease.")
+
+        save_runtime_state({
+            "status": "refreshing_chain",
+            "verified": False,
+            "started_at": started_at,
+            "installation_id": identity["installation_id"],
+            "node_id": identity["node_id"],
+            "client_version": VERSION,
+            "architecture": ARCH,
+        })
+
+        # This refreshes enrollment + secure settings under 3.5.0, verifies the
+        # MeshAgent twice, and deletes the temporary binary before any lease call.
+        agent = verify_agent_binary()
+        if agent.get("client_version") != VERSION or agent.get("architecture") != ARCH:
+            raise RuntimeError("runtime_agent_binding_invalid|Η επαλήθευση MeshAgent δεν δέθηκε στη σωστή έκδοση/αρχιτεκτονική.")
+
+        common = {
+            "node_id": identity["node_id"],
+            "node_secret": identity["node_secret"],
+            "client_version": VERSION,
+            "architecture": ARCH,
+        }
+        issued = broker_post("/managed/runtime-lease/request", common)
+        lease_token = _safe_str(issued.get("runtime_lease"), 90)
+        initial_expires = parse_iso_epoch(issued.get("expires_at"))
+        request_server_until = _as_int(issued.get("server_valid_until")) or parse_iso_epoch(issued.get("server_valid_until"))
+        request_ok = (
+            issued.get("success") is True
+            and issued.get("mode") == "managed_support"
+            and issued.get("phase") == "managed3_runtime_lease_dry_run"
+            and issued.get("runtime_contract") == "smart-pro-managed-runtime-lease-v1"
+            and issued.get("runtime_authorized") is True
+            and issued.get("lease_renewable") is True
+            and issued.get("execution") is False
+            and issued.get("meshcentral_runtime") is False
+            and issued.get("remote_access") is False
+            and issued.get("state") == "runtime_lease_active_execution_disabled"
+            and RUNTIME_LEASE_RE.fullmatch(lease_token) is not None
+            and initial_expires > now_ts()
+            and request_server_until > now_ts()
+            and initial_expires <= request_server_until
+        )
+        if not request_ok:
+            raise RuntimeError("runtime_lease_request_contract_invalid|Ο Broker επέστρεψε μη έγκυρο runtime lease contract.")
+
+        requested_at = now_ts()
+        save_runtime_state({
+            "status": "lease_issued_waiting_renewal",
+            "verified": False,
+            "started_at": started_at,
+            "requested_at": requested_at,
+            "initial_expires_at": initial_expires,
+            "server_valid_until": request_server_until,
+            "installation_id": identity["installation_id"],
+            "node_id": identity["node_id"],
+            "client_version": VERSION,
+            "architecture": ARCH,
+        })
+        print(
+            f"[managed] runtime lease issued for {identity['installation_id']}; "
+            f"waiting {RUNTIME_RENEW_DELAY}s for one renewal; raw lease not persisted/logged",
+            flush=True,
+        )
+
+        time.sleep(RUNTIME_RENEW_DELAY)
+
+        # Local policy is checked again before the server renewal. The Broker
+        # independently re-checks live Portal authorization during renew.
+        if not read_policy().get("allowed_local"):
+            raise RuntimeError("local_policy_denied|Η τοπική Managed πολιτική έπαψε να επιτρέπει runtime lease πριν από την ανανέωση.")
+
+        renew_payload = dict(common)
+        renew_payload["runtime_lease"] = lease_token
+        renewed = broker_post("/managed/runtime-lease/renew", renew_payload)
+        renewed_expires = parse_iso_epoch(renewed.get("expires_at"))
+        renewed_server_until = _as_int(renewed.get("server_valid_until")) or parse_iso_epoch(renewed.get("server_valid_until"))
+        renewed_at = now_ts()
+        renew_ok = (
+            renewed.get("success") is True
+            and renewed.get("mode") == "managed_support"
+            and renewed.get("phase") == "managed3_runtime_lease_dry_run"
+            and renewed.get("runtime_contract") == "smart-pro-managed-runtime-lease-v1"
+            and renewed.get("runtime_authorized") is True
+            and renewed.get("lease_renewed") is True
+            and renewed.get("execution") is False
+            and renewed.get("meshcentral_runtime") is False
+            and renewed.get("remote_access") is False
+            and renewed.get("state") == "runtime_lease_renewed_execution_disabled"
+            and renewed_expires > renewed_at
+            and renewed_server_until > renewed_at
+            and renewed_expires <= renewed_server_until
+            and renewed_expires > initial_expires
+        )
+        if not renew_ok:
+            raise RuntimeError("runtime_lease_renew_contract_invalid|Η ανανέωση του runtime lease δεν επαληθεύτηκε.")
+
+        save_runtime_state({
+            "status": "verified_renewed_once",
+            "verified": True,
+            "started_at": started_at,
+            "requested_at": requested_at,
+            "initial_expires_at": initial_expires,
+            "renewed_at": renewed_at,
+            "renewed_expires_at": renewed_expires,
+            "server_valid_until": renewed_server_until,
+            "installation_id": identity["installation_id"],
+            "node_id": identity["node_id"],
+            "client_version": VERSION,
+            "architecture": ARCH,
+        })
+        print(
+            f"[managed] runtime lease dry-run VERIFIED for {identity['installation_id']}; "
+            "renewed once; execution=false meshcentral_runtime=false remote_access=false; raw lease discarded",
+            flush=True,
+        )
+    except RuntimeError as exc:
+        _runtime_dry_run_failure(exc, identity, started_at)
+    finally:
+        # Explicitly drop the only in-memory copy. The server-side lease is
+        # intentionally allowed to expire on its own after this dry-run.
+        lease_token = ""
+        with RUNTIME_WORKER_LOCK:
+            RUNTIME_WORKER_ACTIVE = False
+
+
+def start_runtime_lease_dry_run():
+    global RUNTIME_WORKER_ACTIVE
+    with RUNTIME_WORKER_LOCK:
+        if RUNTIME_WORKER_ACTIVE:
+            raise RuntimeError("runtime_dry_run_already_running|Υπάρχει ήδη runtime lease dry-run σε εξέλιξη.")
+        RUNTIME_WORKER_ACTIVE = True
+    thread = threading.Thread(target=runtime_lease_dry_run_worker, name="managed-runtime-lease-dry-run", daemon=True)
+    thread.start()
+
+
 def heartbeat_worker():
     last_summary = None
     while True:
@@ -1130,6 +1390,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
     enrollment = load_enrollment_state()
     settings_state = load_settings_state()
     agent_state = load_agent_state()
+    runtime_state = load_runtime_state()
 
     local_allowed = bool(local_snapshot.get("allowed_local"))
     server_allowed = bool(server.get("authorized_server")) and (_as_int(server.get("valid_until")) or 0) > now_ts()
@@ -1192,7 +1453,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         )
         enrollment_current = enrollment_verified and enrollment.get("client_version") == VERSION and enrollment.get("architecture") == ARCH
         if enrollment_current:
-            enrollment_label = "VERIFIED — τρέχον 3.4.0 enrollment consume"
+            enrollment_label = "VERIFIED — τρέχον 3.5.0 enrollment consume"
         elif enrollment_verified:
             enrollment_label = f"Προηγούμενο VERIFIED ({enrollment.get('client_version') or 'άγνωστη έκδοση'}) — θα ανανεωθεί αυτόματα"
         else:
@@ -1222,7 +1483,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         )
         settings_verified = settings_any_verified and settings_state.get("client_version") == VERSION and settings_state.get("architecture") == ARCH
         if settings_verified:
-            settings_label = "VERIFIED — τρέχον 3.4.0 .msh verification"
+            settings_label = "VERIFIED — τρέχον 3.5.0 .msh verification"
         elif settings_any_verified:
             settings_label = f"Προηγούμενο VERIFIED ({settings_state.get('client_version') or 'άγνωστη έκδοση'}) — θα ανανεωθεί αυτόματα"
         else:
@@ -1235,7 +1496,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         settings_html = f"""
 <section class="pairbox">
 <h2>Secure settings verification</h2>
-<p>Εκτελεί νέο enrollment authorization για την 3.4.0 και μετά ζητά/καταναλώνει ακριβώς ένα one-time secure settings ticket. Το raw ticket και το <strong>.msh δεν αποθηκεύονται</strong>. Ελέγχονται integrity, required fields, ασφαλές WSS endpoint και opaque node label.</p>
+<p>Εκτελεί νέο enrollment authorization για την 3.5.0 και μετά ζητά/καταναλώνει ακριβώς ένα one-time secure settings ticket. Το raw ticket και το <strong>.msh δεν αποθηκεύονται</strong>. Ελέγχονται integrity, required fields, ασφαλές WSS endpoint και opaque node label.</p>
 <div class="mini-grid">
 <div><span>Κατάσταση</span><strong>{esc(settings_label)}</strong></div>
 <div><span>Τελευταίος έλεγχος</span><strong>{esc(settings_time)}</strong></div>
@@ -1267,7 +1528,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         agent_html = f"""
 <section class="pairbox">
 <h2>MeshAgent binary verification</h2>
-<p>Ανανεώνει αυτόματα enrollment + secure settings για την 3.4.0 και μετά ζητά/καταναλώνει ακριβώς ένα one-time MeshAgent binary ticket. Το binary γράφεται μόνο προσωρινά με mode 0600, ελέγχεται SHA/bytes/ELF64/architecture δεύτερη φορά από disk και <strong>διαγράφεται αμέσως</strong>. Δεν γίνεται chmod +x ή execution.</p>
+<p>Ανανεώνει αυτόματα enrollment + secure settings για την 3.5.0 και μετά ζητά/καταναλώνει ακριβώς ένα one-time MeshAgent binary ticket. Το binary γράφεται μόνο προσωρινά με mode 0600, ελέγχεται SHA/bytes/ELF64/architecture δεύτερη φορά από disk και <strong>διαγράφεται αμέσως</strong>. Δεν γίνεται chmod +x ή execution.</p>
 <div class="mini-grid">
 <div><span>Κατάσταση</span><strong>{esc(agent_label)}</strong></div>
 <div><span>Τελευταίος έλεγχος</span><strong>{esc(agent_time)}</strong></div>
@@ -1282,18 +1543,63 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </form>
 </section>"""
 
+
+    if identity:
+        runtime_same_identity = (
+            runtime_state.get("installation_id") == identity["installation_id"]
+            and runtime_state.get("node_id") == identity["node_id"]
+            and runtime_state.get("client_version") == VERSION
+            and runtime_state.get("architecture") == ARCH
+        )
+        runtime_status = runtime_state.get("status") if runtime_same_identity else "not_run"
+        if runtime_status == "refreshing_chain":
+            runtime_label = "RUNNING — ανανεώνεται η αλυσίδα 3.5.0"
+        elif runtime_status == "lease_issued_waiting_renewal":
+            runtime_label = "RUNNING — lease εκδόθηκε, αναμένεται μία ανανέωση"
+        elif runtime_status == "verified_renewed_once" and runtime_state.get("verified") is True:
+            runtime_label = "VERIFIED — lease εκδόθηκε και ανανεώθηκε μία φορά"
+        elif runtime_status == "failed":
+            runtime_label = "FAILED — " + (runtime_state.get("error_message") or "Ο έλεγχος απέτυχε")
+        else:
+            runtime_label = "Δεν έχει εκτελεστεί ακόμη"
+        runtime_requested = fmt_epoch(runtime_state.get("requested_at")) if runtime_same_identity else "—"
+        runtime_initial_until = fmt_epoch(runtime_state.get("initial_expires_at")) if runtime_same_identity else "—"
+        runtime_renewed = fmt_epoch(runtime_state.get("renewed_at")) if runtime_same_identity else "—"
+        runtime_renewed_until = fmt_epoch(runtime_state.get("renewed_expires_at")) if runtime_same_identity else "—"
+        runtime_button_disabled = " disabled" if (disabled or runtime_status in {"refreshing_chain", "lease_issued_waiting_renewal"}) else ""
+        runtime_html = f"""
+<section class="pairbox">
+<h2>Runtime lease dry-run</h2>
+<p>Ανανεώνει αυτόματα enrollment + secure settings + MeshAgent verification για την 3.5.0, ζητά ένα βραχύβιο server-authoritative runtime lease και το ανανεώνει <strong>μία φορά</strong> μετά από περίπου {RUNTIME_RENEW_DELAY} δευτερόλεπτα. Το raw lease μένει μόνο στη μνήμη και απορρίπτεται μετά τον έλεγχο. <strong>Δεν εκτελείται MeshAgent</strong> και δεν ανοίγει MeshCentral/remote access.</p>
+<div class="mini-grid">
+<div><span>Κατάσταση</span><strong>{esc(runtime_label)}</strong></div>
+<div><span>Lease εκδόθηκε</span><strong>{esc(runtime_requested)}</strong></div>
+<div><span>Αρχικό lease έως</span><strong>{esc(runtime_initial_until)}</strong></div>
+<div><span>Ανανέωση</span><strong>{esc(runtime_renewed)}</strong></div>
+<div><span>Ανανεωμένο lease έως</span><strong>{esc(runtime_renewed_until)}</strong></div>
+<div><span>Execution / Remote</span><strong>OFF / OFF</strong></div>
+</div>
+<form method="post" action="runtime-lease-check">
+<input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
+<button type="submit"{runtime_button_disabled}>Έλεγχος runtime lease</button>
+</form>
+</section>"""
+    else:
+        runtime_html = ""
+
     return f"""<!doctype html>
 <html lang="el"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Smart Pro Managed Support</title>
 <style>
 :root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;background:#10151d;color:#eef5ff;font:14px/1.5 Arial,Helvetica,sans-serif}}main{{max-width:1000px;margin:0 auto;padding:24px}}.hero{{background:#172231;border:1px solid #2c4158;border-radius:16px;padding:22px;margin-bottom:16px}}h1{{margin:0 0 5px;font-size:27px}}h2{{margin:0 0 10px;font-size:18px}}.sub{{color:#aab9ca}}.badge{{display:inline-block;margin-top:14px;padding:8px 12px;border-radius:999px;font-weight:700}}.ok{{background:#173a2a;color:#9ff0bd;border:1px solid #2c7750}}.bad{{background:#442128;color:#ffb5c0;border:1px solid #8c3d4d}}.warn{{background:#43381a;color:#ffe49a;border:1px solid #8b7331}}.note{{margin-top:15px;padding:13px 15px;border-radius:10px;background:#12293a;border:1px solid #245473;color:#cfeeff}}.notice{{margin:0 0 16px;padding:12px 14px;border-radius:10px}}.notice-ok{{background:#173a2a;border:1px solid #2c7750;color:#bdf7d0}}.notice-bad{{background:#442128;border:1px solid #8c3d4d;color:#ffd0d6}}.notice-info{{background:#12293a;border:1px solid #245473;color:#cfeeff}}.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.card,.pairbox{{background:#171d26;border:1px solid #293646;border-radius:12px;padding:15px}}.k{{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:#8fa1b5}}.v{{font-size:15px;font-weight:700;margin-top:4px;overflow-wrap:anywhere}}.pairbox{{margin:16px 0}}.pairbox p{{color:#b7c5d5}}label{{display:block;font-weight:700;margin:12px 0 6px}}input{{width:100%;max-width:460px;padding:11px 12px;border-radius:8px;border:1px solid #3b4c60;background:#0f151d;color:#fff;font:inherit}}button{{display:block;margin-top:12px;border:0;border-radius:8px;padding:10px 14px;background:#19aee8;color:#06131b;font-weight:800;cursor:pointer}}button:disabled,input:disabled{{opacity:.5;cursor:not-allowed}}code{{color:#9fdfff}}.mini-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.mini-grid div{{background:#111821;border:1px solid #28384a;border-radius:9px;padding:10px}}.mini-grid span{{display:block;color:#8fa1b5;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}}.mini-grid strong{{overflow-wrap:anywhere}}.footer{{margin-top:18px;color:#7f91a6;font-size:12px}}@media(max-width:650px){{main{{padding:14px}}.grid,.mini-grid{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.4.0 · Agent Binary Verification Consumer · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
+<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.5.0 · Runtime Lease Dry-Run Consumer · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
 {notice_html}
 {pair_html}
 {enrollment_html}
 {settings_html}
 {agent_html}
+{runtime_html}
 <section class="grid">
 <div class="card"><div class="k">Installation ID</div><div class="v">{esc(policy.get('installation_id') or (identity or {}).get('installation_id'))}</div></div>
 <div class="card"><div class="k">Smart Pro Tools</div><div class="v">v{esc((policy.get('source') or {}).get('addon_version'))} · Online: {esc(tools_online)}</div></div>
@@ -1308,12 +1614,12 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <div class="card"><div class="k">Authorization chain</div><div class="v">{esc(overall_text)}</div></div>
 <div class="card"><div class="k">Remote access</div><div class="v">Όχι — MeshCentral runtime δεν έχει ενεργοποιηθεί</div></div>
 </section>
-<div class="footer">3.4.0 agent-binary verification consumer. Enrollment και secure settings ανανεώνονται πριν από το one-time binary verification. Το MeshAgent binary διαγράφεται αμέσως, δεν γίνεται εκτελέσιμο, δεν εκτελείται και δεν δημιουργεί MeshCentral node ή remote access.</div>
+<div class="footer">3.5.0 runtime-lease dry-run consumer. Enrollment και secure settings ανανεώνονται πριν από το one-time binary verification. Το MeshAgent binary διαγράφεται αμέσως, δεν γίνεται εκτελέσιμο, δεν εκτελείται και δεν δημιουργεί MeshCentral node ή remote access.</div>
 </main></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SmartProManaged/3.4.0"
+    server_version = "SmartProManaged/3.5.0"
 
     def _send(self, code, body, content_type):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
@@ -1358,6 +1664,10 @@ class Handler(BaseHTTPRequestHandler):
                 "agent_binary_verified_once": bool(load_agent_state().get("verified")),
                 "agent_binary_sha256_hint": load_agent_state().get("sha256_hint") or "",
                 "agent_binary_architecture": load_agent_state().get("architecture") or "",
+                "runtime_lease_dry_run_status": load_runtime_state().get("status") or "not_run",
+                "runtime_lease_renewed_once": bool(load_runtime_state().get("verified")),
+                "runtime_execution": False,
+                "runtime_meshcentral": False,
                 "installation_id": policy.get("installation_id") or server.get("installation_id"),
             }
             self._send(200, json.dumps(payload, ensure_ascii=False), "application/json; charset=utf-8")
@@ -1370,7 +1680,8 @@ class Handler(BaseHTTPRequestHandler):
         is_enrollment = path.endswith("/enrollment-check") or path == "enrollment-check"
         is_settings = path.endswith("/settings-check") or path == "settings-check"
         is_agent = path.endswith("/agent-check") or path == "agent-check"
-        if not is_pair and not is_enrollment and not is_settings and not is_agent:
+        is_runtime = path.endswith("/runtime-lease-check") or path == "runtime-lease-check"
+        if not is_pair and not is_enrollment and not is_settings and not is_agent and not is_runtime:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
         length = _as_int(self.headers.get("Content-Length")) or 0
@@ -1444,6 +1755,27 @@ class Handler(BaseHTTPRequestHandler):
                 )
             return
 
+        if is_runtime:
+            try:
+                start_runtime_lease_dry_run()
+                self._send(
+                    202,
+                    render_page(
+                        read_policy(),
+                        f"Το runtime lease dry-run ξεκίνησε. Θα ανανεώσει πρώτα enrollment/settings/agent verification και θα κάνει μία αυτόματη ανανέωση lease μετά από περίπου {RUNTIME_RENEW_DELAY} δευτερόλεπτα. Κάντε refresh σε περίπου 80–90 δευτερόλεπτα.",
+                        "info",
+                    ),
+                    "text/html; charset=utf-8",
+                )
+            except RuntimeError as exc:
+                message = str(exc).partition("|")[2] or "Δεν ήταν δυνατή η εκκίνηση του runtime lease dry-run."
+                self._send(
+                    409,
+                    render_page(read_policy(), message, "bad"),
+                    "text/html; charset=utf-8",
+                )
+            return
+
         try:
             verify_agent_binary()
             self._send(
@@ -1470,7 +1802,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"[managed] Smart Pro Managed Support {VERSION} agent binary verification consumer listening on {PORT}", flush=True)
+    print(f"[managed] Smart Pro Managed Support {VERSION} runtime lease dry-run consumer listening on {PORT}", flush=True)
     thread = threading.Thread(target=heartbeat_worker, name="managed-heartbeat", daemon=True)
     thread.start()
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

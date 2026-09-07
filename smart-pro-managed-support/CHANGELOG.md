@@ -1,9 +1,19 @@
 # Changelog
 
-## 3.4.0 — Agent Binary Verification Consumer
+## 3.5.0 — Runtime Lease Dry-Run Consumer
+
+- Προσθέτει verification-only consumer του Broker 0.30.0 `smart-pro-managed-runtime-lease-v1`.
+- Ένα button ανανεώνει αυτόματα enrollment + secure settings + MeshAgent binary verification για την 3.5.0.
+- Ζητά ένα βραχύβιο runtime lease και το ανανεώνει ακριβώς μία φορά μετά από ~70s.
+- Το raw `SPMRL-*` lease μένει μόνο στη μνήμη του background worker και δεν αποθηκεύεται/εμφανίζεται/logged.
+- Μετά την επιτυχή ανανέωση το local raw lease απορρίπτεται και το server lease αφήνεται να λήξει φυσιολογικά.
+- Αποθηκεύονται μόνο μη-μυστικά timestamps/status για QA.
+- MeshAgent execution, chmod +x, MeshCentral runtime/node και remote access παραμένουν OFF.
+
+## 3.5.0 — Agent Binary Verification Consumer
 
 - Προσθέτει verification-only one-time MeshAgent binary request/consume μέσω Broker 0.29.0.
-- Πριν από binary delivery εκτελεί fresh 3.4.0 enrollment + secure settings verification.
+- Πριν από binary delivery εκτελεί fresh 3.5.0 enrollment + secure settings verification.
 - Το binary γράφεται μόνο σε /tmp με mode 0600, ελέγχεται streaming SHA/bytes, ELF64/little-endian/e_machine και ξανά SHA/bytes από disk.
 - Διαγράφεται αμέσως μετά τον έλεγχο, και σε failure cleanup path.
 - Δεν γίνεται chmod +x, δεν εκτελείται subprocess/MeshAgent και δεν δημιουργείται MeshCentral node.
