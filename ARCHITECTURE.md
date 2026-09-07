@@ -14,8 +14,8 @@ Only `local_allowed && server_authorized` produces `authorized_managed=true`.
 MeshCentral enrollment/runtime is a later stage and remains absent from 3.2.0.
 
 
-## 3.6.0 secure-settings boundary
+## 3.6.1 secure-settings boundary
 
-`Local Policy ALLOWED + Server Authorization ALLOWED + fresh 3.6.0 enrollment consume` → one-time secure settings ticket → in-memory `.msh` verification → discard raw payload.
+`Local Policy ALLOWED + Server Authorization ALLOWED + fresh 3.6.1 enrollment consume` → one-time secure settings ticket → in-memory `.msh` verification → discard raw payload.
 
 This stage does not execute or persist MeshAgent and does not create a MeshCentral runtime connection.
