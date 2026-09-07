@@ -1,15 +1,18 @@
-# Smart Pro Managed Support 3.7.0
+# Smart Pro Managed Support 3.8.0
 
-## Stable MeshAgent Identity Canary
+## Continuous Foreground Runtime Consumer — first live checkpoint
 
-Η 3.7.0 κρατά όλη την ασφαλή verified αλυσίδα της 3.6.2 και προσθέτει **ελεγχόμενη συνέχεια MeshCentral ταυτότητας**.
+Η 3.8.0 είναι το πρώτο client στάδιο μετά το live PASS της σταθερής MeshCentral identity στην 3.7.0 και απαιτεί Broker 0.32.0+.
 
-Το canary παραμένει χειροκίνητο, foreground και έως 45s. Η πρώτη επιτυχής εκτέλεση δημιουργεί και αποθηκεύει ιδιωτικά το `meshagent.db`. Το runtime `.msh` θέτει επίσης `skipmaccheck=1` για να μη γίνεται αλλαγή NodeID λόγω αλλαγής MAC του add-on container. Η επόμενη εκτέλεση πρέπει να επαναχρησιμοποιήσει το ίδιο DB ώστε το ίδιο server-side MeshCentral node να γίνει ξανά online, χωρίς νέο duplicate.
+- Χρησιμοποιεί μόνο υπάρχουσα VERIFIED σταθερή `meshagent.db` identity. Δεν κάνει seed νέας identity.
+- Κάνει fresh enrollment/settings/agent verification πριν από start.
+- Ζητά renewable runtime lease και το νέο `smart-pro-managed-persistent-runtime-v1` authorization.
+- Εκτελεί μόνο foreground `setsid ./meshagent`, χωρίς `-install` ή service persistence.
+- Polls continuous server watch και στέλνει health reports.
+- Ανανεώνει το runtime lease όταν ζητηθεί από τον Broker.
+- Σε agent exit κάνει bounded controlled reconnect με την ίδια identity.
+- Σε local policy/server authorization/runtime lease loss σταματά fail-closed.
+- Technician actions παραμένουν NOT AUTHORIZED.
+- Raw runtime lease, start ticket και control token μένουν μόνο στη μνήμη.
 
-Παραμένουν απενεργοποιημένα:
-- `MeshAgent -install`,
-- service/systemd persistence,
-- unattended 24/7 runtime,
-- Desktop / Terminal / Files technician authorization.
-
-Binary, `.msh`, runtime lease και one-time authorization tokens παραμένουν ephemeral.
+Για το πρώτο live checkpoint, η continuous λειτουργία ξεκινά χειροκίνητα από Ingress. Το update μόνο του δεν ενεργοποιεί MeshAgent.

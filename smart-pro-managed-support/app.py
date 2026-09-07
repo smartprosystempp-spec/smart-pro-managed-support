@@ -21,7 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.7.0")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.8.0")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -36,6 +36,7 @@ SETTINGS_STATE_FILE = DATA_DIR / "settings-verification.json"
 AGENT_STATE_FILE = DATA_DIR / "agent-binary-verification.json"
 RUNTIME_STATE_FILE = DATA_DIR / "runtime-lease-dry-run.json"
 CANARY_STATE_FILE = DATA_DIR / "identity-continuity-canary.json"
+PERSISTENT_STATE_FILE = DATA_DIR / "continuous-runtime-state.json"
 MESH_IDENTITY_DIR = DATA_DIR / "meshagent-identity"
 MESH_IDENTITY_DB_FILE = MESH_IDENTITY_DIR / "meshagent.db"
 MESH_IDENTITY_META_FILE = MESH_IDENTITY_DIR / "identity-meta.json"
@@ -61,6 +62,8 @@ AGENT_TICKET_RE = re.compile(r"^SPMA-[A-Za-z0-9_-]{43}$")
 RUNTIME_LEASE_RE = re.compile(r"^SPMRL-[A-Za-z0-9_-]{43}$")
 CANARY_TICKET_RE = re.compile(r"^SPMEC-[A-Za-z0-9_-]{43}$")
 CANARY_REPORT_RE = re.compile(r"^SPMER-[A-Za-z0-9_-]{43}$")
+PERSISTENT_TICKET_RE = re.compile(r"^SPMPR-[A-Za-z0-9_-]{43}$")
+PERSISTENT_CONTROL_RE = re.compile(r"^SPMPC-[A-Za-z0-9_-]{43}$")
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 AGENT_LABEL_RE = re.compile(r"^SPMNG-[A-F0-9]{16}$")
 FINGERPRINT_HINT_RE = re.compile(r"^[a-f0-9]{12}$")
@@ -73,6 +76,12 @@ RUNTIME_WORKER_LOCK = threading.Lock()
 RUNTIME_WORKER_ACTIVE = False
 CANARY_WORKER_LOCK = threading.Lock()
 CANARY_WORKER_ACTIVE = False
+PERSISTENT_WORKER_LOCK = threading.Lock()
+PERSISTENT_WORKER_ACTIVE = False
+PERSISTENT_STOP_EVENT = threading.Event()
+PERSISTENT_RECONNECT_DELAYS = (5, 10, 20, 30, 60)
+PERSISTENT_MAX_CONSECUTIVE_EXITS = 5
+PERSISTENT_WATCH_FAILURE_GRACE = 45
 SERVER_STATE = {
     "paired": False,
     "state": "unpaired",
@@ -1368,6 +1377,8 @@ CANARY_WORKER_ACTIVE = False
 def start_runtime_lease_dry_run():
     global RUNTIME_WORKER_ACTIVE
     with RUNTIME_WORKER_LOCK:
+        if PERSISTENT_WORKER_ACTIVE:
+            raise RuntimeError("runtime_dry_run_persistent_active|Δεν εκτελείται runtime lease dry-run όσο είναι ενεργή η continuous Managed λειτουργία.")
         if RUNTIME_WORKER_ACTIVE:
             raise RuntimeError("runtime_dry_run_already_running|Υπάρχει ήδη runtime lease dry-run σε εξέλιξη.")
         RUNTIME_WORKER_ACTIVE = True
@@ -2050,9 +2061,450 @@ def connectivity_canary_worker():
 def start_connectivity_canary():
     global CANARY_WORKER_ACTIVE
     with CANARY_WORKER_LOCK:
+        if PERSISTENT_WORKER_ACTIVE:
+            raise RuntimeError('canary_persistent_active|Δεν εκτελείται identity canary όσο είναι ενεργή η continuous Managed λειτουργία.')
         if CANARY_WORKER_ACTIVE: raise RuntimeError('canary_already_running|Υπάρχει ήδη identity continuity canary σε εξέλιξη.')
         CANARY_WORKER_ACTIVE=True
     t=threading.Thread(target=connectivity_canary_worker,name='managed-identity-continuity-canary',daemon=True); t.start()
+
+
+def load_persistent_state():
+    try:
+        if not PERSISTENT_STATE_FILE.exists():
+            return {}
+        if PERSISTENT_STATE_FILE.stat().st_size <= 0 or PERSISTENT_STATE_FILE.stat().st_size > 32768:
+            return {}
+        data = json.loads(PERSISTENT_STATE_FILE.read_text(encoding='utf-8'))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        'status': _safe_str(data.get('status'), 40),
+        'verified': data.get('verified') is True,
+        'started_at': _as_int(data.get('started_at')) or 0,
+        'ended_at': _as_int(data.get('ended_at')) or 0,
+        'result_code': _safe_str(data.get('result_code'), 80),
+        'health_state': _safe_str(data.get('health_state'), 40),
+        'last_reason': _safe_str(data.get('last_reason'), 100),
+        'last_watch_at': _as_int(data.get('last_watch_at')) or 0,
+        'last_health_at': _as_int(data.get('last_health_at')) or 0,
+        'runtime_lease_expires_at': _as_int(data.get('runtime_lease_expires_at')) or 0,
+        'lease_renewals': max(0, _as_int(data.get('lease_renewals')) or 0),
+        'reconnect_count': max(0, _as_int(data.get('reconnect_count')) or 0),
+        'agent_label': _safe_str(data.get('agent_label'), 40).upper(),
+        'installation_id': _safe_str(data.get('installation_id'), 100).upper(),
+        'node_id': _safe_str(data.get('node_id'), 64).upper(),
+        'client_version': _safe_str(data.get('client_version'), 30),
+        'architecture': _safe_str(data.get('architecture'), 20),
+        'identity_mode': _safe_str(data.get('identity_mode'), 20),
+        'identity_generation': max(0, _as_int(data.get('identity_generation')) or 0),
+        'identity_continuity_runs': max(0, _as_int(data.get('identity_continuity_runs')) or 0),
+        'runtime_directory_deleted': data.get('runtime_directory_deleted') is True,
+        'technician_actions_authorized': False,
+        'service_persistence': False,
+        'control_token_persisted': False,
+        'runtime_lease_persisted': False,
+    }
+
+
+def save_persistent_state(state):
+    """Persist only non-secret continuous-runtime telemetry. Raw lease/ticket/control token are forbidden."""
+    safe = {
+        'status': _safe_str(state.get('status'), 40),
+        'verified': state.get('verified') is True,
+        'started_at': _as_int(state.get('started_at')) or 0,
+        'ended_at': _as_int(state.get('ended_at')) or 0,
+        'result_code': _safe_str(state.get('result_code'), 80),
+        'health_state': _safe_str(state.get('health_state'), 40),
+        'last_reason': _safe_str(state.get('last_reason'), 100),
+        'last_watch_at': _as_int(state.get('last_watch_at')) or 0,
+        'last_health_at': _as_int(state.get('last_health_at')) or 0,
+        'runtime_lease_expires_at': _as_int(state.get('runtime_lease_expires_at')) or 0,
+        'lease_renewals': max(0, _as_int(state.get('lease_renewals')) or 0),
+        'reconnect_count': max(0, _as_int(state.get('reconnect_count')) or 0),
+        'agent_label': _safe_str(state.get('agent_label'), 40).upper(),
+        'installation_id': _safe_str(state.get('installation_id'), 100).upper(),
+        'node_id': _safe_str(state.get('node_id'), 64).upper(),
+        'client_version': _safe_str(state.get('client_version'), 30),
+        'architecture': _safe_str(state.get('architecture'), 20),
+        'identity_mode': _safe_str(state.get('identity_mode'), 20),
+        'identity_generation': max(0, _as_int(state.get('identity_generation')) or 0),
+        'identity_continuity_runs': max(0, _as_int(state.get('identity_continuity_runs')) or 0),
+        'runtime_directory_deleted': state.get('runtime_directory_deleted') is True,
+        'technician_actions_authorized': False,
+        'service_persistence': False,
+        'control_token_persisted': False,
+        'runtime_lease_persisted': False,
+    }
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = PERSISTENT_STATE_FILE.with_suffix('.tmp')
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(json.dumps(safe, ensure_ascii=False, separators=(',', ':')))
+            handle.flush(); os.fsync(handle.fileno())
+        os.replace(tmp, PERSISTENT_STATE_FILE); os.chmod(PERSISTENT_STATE_FILE, 0o600)
+    finally:
+        try:
+            if tmp.exists(): tmp.unlink()
+        except OSError: pass
+
+
+def _persistent_state_update(base, **changes):
+    next_state = dict(base or {})
+    next_state.update(changes)
+    save_persistent_state(next_state)
+    return next_state
+
+
+def _persistent_health(identity, control_token, health_state, reason=''):
+    try:
+        data = broker_post('/managed/persistent-runtime/health', {
+            'control_token': control_token,
+            'node_id': identity['node_id'],
+            'node_secret': identity['node_secret'],
+            'health_state': health_state,
+            'reason': reason,
+        })
+        return data if isinstance(data, dict) else {}
+    except RuntimeError:
+        return {}
+
+
+def _persistent_report(identity, control_token, result_code):
+    if not control_token:
+        return False
+    try:
+        data = broker_post('/managed/persistent-runtime/report', {
+            'control_token': control_token,
+            'node_id': identity['node_id'],
+            'node_secret': identity['node_secret'],
+            'result_code': result_code,
+        })
+        return data.get('success') is True and data.get('reported') is True
+    except RuntimeError:
+        return False
+
+
+def _persistent_launch(runtime_dir, env):
+    return subprocess.Popen(
+        ['setsid', './meshagent'], cwd=str(runtime_dir), stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, close_fds=True,
+    )
+
+
+def persistent_runtime_worker():
+    """First live continuous foreground runtime consumer.
+
+    This 3.8.0 checkpoint is intentionally started manually from Ingress. Once
+    started, the MeshAgent may remain online indefinitely only while local policy,
+    live Broker authorization, continuous watch and the renewable runtime lease
+    remain valid. Technician actions remain explicitly unauthorized.
+    """
+    global PERSISTENT_WORKER_ACTIVE
+    identity = load_identity()
+    runtime_dir = None
+    agent_temp = None
+    proc = None
+    runtime_lease = ''
+    runtime_ticket = ''
+    control_token = ''
+    settings = None
+    prior_identity = None
+    base_state = {}
+    result_code = 'stopped'
+    last_reason = 'manual_stop'
+    cleanup_ok = True
+    report_ok = False
+    started_at = now_ts()
+    lease_expires = 0
+    lease_renewals = 0
+    reconnect_count = 0
+    consecutive_exits = 0
+    try:
+        if identity is None:
+            raise RuntimeError('persistent_not_paired|Απαιτείται ενεργή Managed identity πριν από τη συνεχή λειτουργία.')
+        snapshot = read_policy()
+        if not snapshot.get('allowed_local'):
+            raise RuntimeError('persistent_local_policy_denied|Η τοπική Managed πολιτική δεν επιτρέπει συνεχή λειτουργία.')
+        server = get_server_state()
+        if server.get('authorized_server') is not True or (_as_int(server.get('valid_until')) or 0) <= now_ts():
+            raise RuntimeError('persistent_server_authorization_required|Απαιτείται ενεργό Broker Server Authorization πριν από τη συνεχή λειτουργία.')
+        prior_identity = _validate_persisted_mesh_identity(identity, None)
+        if prior_identity.get('state') != 'ready':
+            raise RuntimeError('persistent_identity_not_ready|Απαιτείται ήδη VERIFIED σταθερή MeshCentral ταυτότητα από το 3.7.0. Η 3.8.0 δεν δημιουργεί νέα identity.')
+
+        base_state = {
+            'status': 'preparing', 'verified': False, 'started_at': started_at,
+            'health_state': 'starting', 'last_reason': 'refreshing_verified_chain',
+            'installation_id': identity['installation_id'], 'node_id': identity['node_id'],
+            'client_version': VERSION, 'architecture': ARCH,
+            'identity_mode': 'reuse', 'identity_generation': prior_identity.get('generation', 0),
+            'identity_continuity_runs': prior_identity.get('continuity_runs', 0),
+            'agent_label': prior_identity.get('agent_label', ''), 'runtime_directory_deleted': False,
+        }
+        save_persistent_state(base_state)
+
+        # Fresh verification chain under 3.8.0. Raw settings and binary remain ephemeral.
+        settings = _execution_settings_material(identity)
+        verified_identity = _validate_persisted_mesh_identity(identity, settings)
+        if verified_identity.get('state') != 'ready':
+            raise RuntimeError('persistent_identity_binding_failed|Η σταθερή MeshCentral identity δεν επαληθεύτηκε με τα νέα .msh settings.')
+        if not secrets.compare_digest(_safe_str(verified_identity.get('agent_label'),40).upper(), _safe_str(settings.get('agent_label'),40).upper()):
+            raise RuntimeError('persistent_identity_label_mismatch|Το verified node label δεν συμφωνεί με τη σταθερή MeshCentral identity.')
+        agent = _execution_agent_material(identity, settings)
+        agent_temp = agent.get('path')
+        if not agent_temp:
+            raise RuntimeError('persistent_agent_missing|Δεν προετοιμάστηκε verified MeshAgent binary.')
+
+        common = {'node_id': identity['node_id'], 'node_secret': identity['node_secret'], 'client_version': VERSION, 'architecture': ARCH}
+        lease = broker_post('/managed/runtime-lease/request', common)
+        runtime_lease = _safe_str(lease.get('runtime_lease'), 90)
+        lease_expires = parse_iso_epoch(lease.get('expires_at'))
+        server_until = _as_int(lease.get('server_valid_until')) or parse_iso_epoch(lease.get('server_valid_until'))
+        if not (
+            lease.get('success') is True and lease.get('runtime_contract') == 'smart-pro-managed-runtime-lease-v1'
+            and lease.get('runtime_authorized') is True and lease.get('lease_renewable') is True
+            and RUNTIME_LEASE_RE.fullmatch(runtime_lease) is not None and lease_expires > now_ts()
+            and server_until > now_ts() and lease_expires <= server_until
+        ):
+            raise RuntimeError('persistent_runtime_lease_invalid|Ο Broker δεν επέστρεψε έγκυρο renewable runtime lease.')
+
+        req = dict(common); req['runtime_lease'] = runtime_lease
+        auth = broker_post('/managed/persistent-runtime/request', req)
+        runtime_ticket = _safe_str(auth.get('runtime_ticket'), 90)
+        control_token = _safe_str(auth.get('control_token'), 90)
+        if not (
+            auth.get('success') is True and auth.get('runtime_contract') == 'smart-pro-managed-persistent-runtime-v1'
+            and auth.get('state') == 'persistent_runtime_ticket_issued_not_started'
+            and auth.get('foreground_only') is True and auth.get('service_persistence') is False
+            and auth.get('technician_actions_authorized') is False and auth.get('remote_access') is False
+            and PERSISTENT_TICKET_RE.fullmatch(runtime_ticket) is not None
+            and PERSISTENT_CONTROL_RE.fullmatch(control_token) is not None
+            and parse_iso_epoch(auth.get('expires_at')) > now_ts()
+        ):
+            raise RuntimeError('persistent_authorization_invalid|Ο Broker δεν επέστρεψε έγκυρη continuous-runtime authorization.')
+
+        consume = dict(common); consume['runtime_ticket'] = runtime_ticket
+        run = broker_post('/managed/persistent-runtime/consume', consume)
+        watch_interval = _as_int(run.get('watch_interval_seconds')) or 15
+        health_interval = _as_int(run.get('health_interval_seconds')) or 30
+        renew_before = _as_int(run.get('renew_before_seconds')) or 75
+        consume_lease_expires = parse_iso_epoch(run.get('runtime_lease_expires_at'))
+        if not (
+            run.get('success') is True and run.get('runtime_contract') == 'smart-pro-managed-persistent-runtime-v1'
+            and run.get('state') == 'persistent_runtime_authorized_connectivity_only'
+            and run.get('foreground_only') is True and run.get('service_persistence') is False
+            and run.get('meshcentral_runtime_authorized') is True
+            and run.get('technician_actions_authorized') is False and run.get('remote_access') is False
+            and 5 <= watch_interval <= 60 and 10 <= health_interval <= 120 and 30 <= renew_before <= 120
+            and consume_lease_expires > now_ts()
+        ):
+            raise RuntimeError('persistent_consume_invalid|Η continuous-runtime authorization δεν καταναλώθηκε σωστά.')
+        lease_expires = consume_lease_expires
+
+        runtime_dir = Path(tempfile.mkdtemp(prefix='smart-pro-managed-continuous-', dir='/tmp')); os.chmod(runtime_dir, 0o700)
+        agent_path = runtime_dir / 'meshagent'; shutil.move(agent_temp, agent_path); agent_temp = None; os.chmod(agent_path, 0o700)
+        msh_path = runtime_dir / 'meshagent.msh'; hardened = _harden_runtime_msh(settings['raw'], settings['agent_label'])
+        fd = os.open(msh_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'wb') as handle:
+            handle.write(hardened); handle.flush(); os.fsync(handle.fileno())
+        private = runtime_dir / 'private'; private.mkdir(mode=0o700)
+        os.chmod(private, 0o700)
+        prepared = _copy_persisted_identity_into_runtime(runtime_dir, identity, settings)
+        if prepared.get('mode') != 'reuse':
+            raise RuntimeError('persistent_identity_reuse_required|Η 3.8.0 απαιτεί reuse της ήδη αποθηκευμένης MeshCentral identity και δεν επιτρέπεται seed νέου node.')
+        env = os.environ.copy(); env.update({'HOME':str(private),'TMPDIR':str(private),'XDG_CONFIG_HOME':str(private),'XDG_CACHE_HOME':str(private)})
+
+        proc = _persistent_launch(runtime_dir, env)
+        launch_mono = time.monotonic()
+        last_watch_success = time.monotonic()
+        next_watch = 0.0
+        next_health = 0.0
+        base_state = _persistent_state_update(base_state, status='running', verified=True, started_at=now_ts(),
+            health_state='starting', last_reason='persistent_runtime_started', runtime_lease_expires_at=lease_expires,
+            agent_label=settings['agent_label'], identity_mode='reuse', runtime_directory_deleted=False)
+        _persistent_health(identity, control_token, 'starting', 'persistent_runtime_started')
+        print(f"[managed] continuous runtime started for {identity['installation_id']} label={settings['agent_label']} identity=reuse; technician_actions=false", flush=True)
+
+        while True:
+            now_mono = time.monotonic()
+            if PERSISTENT_STOP_EVENT.is_set():
+                result_code='stopped'; last_reason='manual_stop'; break
+            if not read_policy().get('allowed_local'):
+                result_code='stopped'; last_reason='local_policy_denied'; break
+
+            if proc.poll() is not None:
+                if now_mono - launch_mono >= 60:
+                    consecutive_exits = 0
+                consecutive_exits += 1
+                reconnect_count += 1
+                if consecutive_exits > PERSISTENT_MAX_CONSECUTIVE_EXITS:
+                    result_code='agent_exit'; last_reason='reconnect_limit_reached'; break
+                delay = PERSISTENT_RECONNECT_DELAYS[min(consecutive_exits-1, len(PERSISTENT_RECONNECT_DELAYS)-1)]
+                base_state = _persistent_state_update(base_state, status='reconnecting', health_state='reconnecting',
+                    last_reason='agent_exit_reconnect_wait', reconnect_count=reconnect_count, runtime_lease_expires_at=lease_expires)
+                _persistent_health(identity, control_token, 'reconnecting', 'agent_exit_reconnect_wait')
+                wait_until = time.monotonic() + delay
+                while time.monotonic() < wait_until:
+                    if PERSISTENT_STOP_EVENT.is_set(): break
+                    if not read_policy().get('allowed_local'): break
+                    time.sleep(1)
+                if PERSISTENT_STOP_EVENT.is_set():
+                    result_code='stopped'; last_reason='manual_stop'; break
+                if not read_policy().get('allowed_local'):
+                    result_code='stopped'; last_reason='local_policy_denied'; break
+                # Server must still explicitly allow continuation immediately before reconnect.
+                try:
+                    watch = broker_post('/managed/persistent-runtime/watch', {'control_token':control_token,'node_id':identity['node_id'],'node_secret':identity['node_secret']})
+                except RuntimeError:
+                    result_code='server_authorization_lost'; last_reason='watch_failed_before_reconnect'; break
+                if watch.get('continue') is not True:
+                    result_code='server_authorization_lost'; last_reason=_safe_str(watch.get('reason'),100) or 'watch_denied_before_reconnect'; break
+                if watch.get('renew_runtime_lease') is True or (lease_expires - now_ts()) <= renew_before:
+                    renew = dict(common); renew['runtime_lease'] = runtime_lease
+                    try:
+                        renewed = broker_post('/managed/runtime-lease/renew', renew)
+                    except RuntimeError:
+                        result_code='runtime_lease_lost'; last_reason='runtime_lease_renew_failed_before_reconnect'; break
+                    renewed_expires = parse_iso_epoch(renewed.get('expires_at'))
+                    renewed_server_until = _as_int(renewed.get('server_valid_until')) or parse_iso_epoch(renewed.get('server_valid_until'))
+                    if not (renewed.get('success') is True and renewed.get('runtime_contract') == 'smart-pro-managed-runtime-lease-v1'
+                            and renewed.get('lease_renewed') is True and renewed_expires > now_ts()
+                            and renewed_server_until > now_ts() and renewed_expires <= renewed_server_until):
+                        result_code='runtime_lease_lost'; last_reason='runtime_lease_renew_contract_invalid_before_reconnect'; break
+                    lease_expires = renewed_expires; lease_renewals += 1
+                proc = _persistent_launch(runtime_dir, env); launch_mono = time.monotonic(); last_watch_success = time.monotonic()
+                base_state = _persistent_state_update(base_state, status='running', health_state='online',
+                    last_reason='controlled_reconnect', last_watch_at=now_ts(), reconnect_count=reconnect_count)
+                print(f"[managed] controlled MeshAgent reconnect #{reconnect_count} using same persisted identity", flush=True)
+                next_watch = time.monotonic() + max(5, watch_interval)
+                next_health = 0.0
+                continue
+
+            if now_mono >= next_watch:
+                try:
+                    watch = broker_post('/managed/persistent-runtime/watch', {'control_token':control_token,'node_id':identity['node_id'],'node_secret':identity['node_secret']})
+                    last_watch_success = time.monotonic()
+                except RuntimeError:
+                    if time.monotonic() - last_watch_success >= PERSISTENT_WATCH_FAILURE_GRACE or now_ts() >= lease_expires:
+                        result_code='server_authorization_lost'; last_reason='watch_unreachable_fail_closed'; break
+                    base_state = _persistent_state_update(base_state, health_state='reconnecting', last_reason='watch_temporarily_unreachable')
+                    next_watch = time.monotonic() + 5
+                    time.sleep(1)
+                    continue
+                if watch.get('continue') is not True:
+                    reason = _safe_str(watch.get('reason'),100) or 'watch_denied'
+                    result_code = 'runtime_lease_lost' if reason.startswith('runtime_lease_') else 'server_authorization_lost'
+                    last_reason = reason
+                    break
+                base_state = _persistent_state_update(base_state, status='running', health_state='online',
+                    last_reason='persistent_runtime_allowed', last_watch_at=now_ts(), runtime_lease_expires_at=lease_expires)
+                if watch.get('renew_runtime_lease') is True or (lease_expires - now_ts()) <= renew_before:
+                    renew = dict(common); renew['runtime_lease'] = runtime_lease
+                    try:
+                        renewed = broker_post('/managed/runtime-lease/renew', renew)
+                    except RuntimeError:
+                        result_code='runtime_lease_lost'; last_reason='runtime_lease_renew_failed'; break
+                    renewed_expires = parse_iso_epoch(renewed.get('expires_at'))
+                    renewed_server_until = _as_int(renewed.get('server_valid_until')) or parse_iso_epoch(renewed.get('server_valid_until'))
+                    if not (
+                        renewed.get('success') is True and renewed.get('runtime_contract') == 'smart-pro-managed-runtime-lease-v1'
+                        and renewed.get('lease_renewed') is True and renewed_expires > now_ts()
+                        and renewed_server_until > now_ts() and renewed_expires <= renewed_server_until
+                    ):
+                        result_code='runtime_lease_lost'; last_reason='runtime_lease_renew_contract_invalid'; break
+                    lease_expires = renewed_expires; lease_renewals += 1
+                    base_state = _persistent_state_update(base_state, runtime_lease_expires_at=lease_expires,
+                        lease_renewals=lease_renewals, last_reason='runtime_lease_renewed')
+                    print(f"[managed] continuous runtime lease renewed count={lease_renewals}; raw lease remains memory-only", flush=True)
+                next_watch = time.monotonic() + max(5, watch_interval)
+
+            if now_mono >= next_health:
+                health = _persistent_health(identity, control_token, 'online', 'meshagent_foreground_online')
+                if health and health.get('continue') is False:
+                    result_code='server_authorization_lost'; last_reason=_safe_str(health.get('reason'),100) or 'health_denied'; break
+                base_state = _persistent_state_update(base_state, health_state='online', last_health_at=now_ts(),
+                    last_reason='meshagent_foreground_online', reconnect_count=reconnect_count, lease_renewals=lease_renewals,
+                    runtime_lease_expires_at=lease_expires)
+                next_health = time.monotonic() + max(10, health_interval)
+
+            if now_mono - launch_mono >= 60:
+                consecutive_exits = 0
+            time.sleep(1)
+
+        base_state = _persistent_state_update(base_state, status='stopping', health_state='stopping', last_reason=last_reason,
+            reconnect_count=reconnect_count, lease_renewals=lease_renewals, runtime_lease_expires_at=lease_expires)
+        _persistent_health(identity, control_token, 'stopping', last_reason)
+        _terminate_process_group(proc); proc = None
+        persisted = _persist_runtime_mesh_identity(runtime_dir, identity, settings, prior_identity)
+        report_ok = _persistent_report(identity, control_token, result_code)
+        base_state = _persistent_state_update(base_state, status='reported' if report_ok else 'stopped', verified=report_ok,
+            ended_at=now_ts(), result_code=result_code, health_state='stopped', last_reason=last_reason,
+            identity_generation=persisted.get('generation',0), identity_continuity_runs=persisted.get('continuity_runs',0),
+            reconnect_count=reconnect_count, lease_renewals=lease_renewals, runtime_lease_expires_at=lease_expires)
+        print(f"[managed] continuous runtime stopped result={result_code} reported={str(report_ok).lower()} renewals={lease_renewals} reconnects={reconnect_count}; technician_actions=false", flush=True)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        if proc is not None:
+            _terminate_process_group(proc); proc = None
+        text = str(exc); code, sep, message = text.partition('|')
+        if not sep:
+            code='persistent_runtime_failed'; message=text or 'Η συνεχής Managed λειτουργία απέτυχε.'
+        result_code = 'identity_invalid' if 'identity' in code else 'launch_failed'
+        if control_token and identity:
+            _persistent_report(identity, control_token, result_code)
+        fail = dict(base_state or {})
+        fail.update({'status':'failed','verified':False,'ended_at':now_ts(),'result_code':code,'health_state':'error',
+            'last_reason':_safe_str(message,100),'installation_id':(identity or {}).get('installation_id',''),
+            'node_id':(identity or {}).get('node_id',''),'client_version':VERSION,'architecture':ARCH,
+            'runtime_lease_expires_at':lease_expires,'lease_renewals':lease_renewals,'reconnect_count':reconnect_count,
+            'identity_mode':'reuse','runtime_directory_deleted':False})
+        save_persistent_state(fail)
+        print(f"[managed] continuous runtime failed code={code}; raw lease/ticket/control token not logged or persisted", flush=True)
+    finally:
+        if proc is not None:
+            _terminate_process_group(proc)
+        if agent_temp:
+            try: Path(agent_temp).unlink(missing_ok=True)
+            except OSError: cleanup_ok=False
+        if runtime_dir:
+            try: shutil.rmtree(runtime_dir)
+            except OSError: cleanup_ok=False
+        state = load_persistent_state()
+        if state:
+            state['runtime_directory_deleted'] = cleanup_ok
+            save_persistent_state(state)
+        runtime_lease = ''; runtime_ticket = ''; control_token = ''
+        PERSISTENT_STOP_EVENT.clear()
+        with PERSISTENT_WORKER_LOCK:
+            PERSISTENT_WORKER_ACTIVE = False
+
+
+def start_persistent_runtime():
+    global PERSISTENT_WORKER_ACTIVE
+    with PERSISTENT_WORKER_LOCK:
+        if PERSISTENT_WORKER_ACTIVE:
+            raise RuntimeError('persistent_runtime_already_running|Η συνεχής Managed λειτουργία εκτελείται ήδη.')
+        if CANARY_WORKER_ACTIVE:
+            raise RuntimeError('persistent_canary_active|Περιμένετε να ολοκληρωθεί το identity canary πριν ξεκινήσει συνεχής λειτουργία.')
+        identity = load_identity()
+        if identity is None:
+            raise RuntimeError('persistent_not_paired|Απαιτείται ενεργή Managed identity.')
+        status = get_mesh_identity_status(identity)
+        if status.get('state') != 'ready':
+            raise RuntimeError('persistent_identity_not_ready|Η σταθερή MeshCentral identity δεν είναι READY. Δεν θα δημιουργηθεί νέο node από την 3.8.0.')
+        PERSISTENT_STOP_EVENT.clear()
+        PERSISTENT_WORKER_ACTIVE = True
+    thread = threading.Thread(target=persistent_runtime_worker, name='managed-continuous-runtime', daemon=True)
+    thread.start()
+
+
+def stop_persistent_runtime():
+    with PERSISTENT_WORKER_LOCK:
+        if not PERSISTENT_WORKER_ACTIVE:
+            raise RuntimeError('persistent_runtime_not_running|Δεν υπάρχει ενεργή συνεχής Managed λειτουργία για τερματισμό.')
+        PERSISTENT_STOP_EVENT.set()
 
 def heartbeat_worker():
     last_summary = None
@@ -2089,6 +2541,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
     agent_state = load_agent_state()
     runtime_state = load_runtime_state()
     canary_state = load_canary_state()
+    persistent_state = load_persistent_state()
 
     local_allowed = bool(local_snapshot.get("allowed_local"))
     server_allowed = bool(server.get("authorized_server")) and (_as_int(server.get("valid_until")) or 0) > now_ts()
@@ -2096,7 +2549,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 
     if overall:
         badge_class, badge = "ok", "Managed authorization: ΕΠΙΤΡΕΠΕΤΑΙ"
-        reason = "Local Policy και Broker Server Authorization συμφωνούν. Το remote access παραμένει κλειστό μέχρι το επόμενο MeshCentral στάδιο."
+        reason = "Local Policy και Broker Server Authorization συμφωνούν. Η συσκευή μπορεί να χρησιμοποιηθεί για ελεγχόμενη continuous connectivity, ενώ η τεχνική πρόσβαση παραμένει ξεχωριστά κλειδωμένη."
     elif identity is None:
         badge_class, badge = "warn", "Απαιτείται αρχική ενεργοποίηση"
         reason = "Η τοπική πολιτική είναι έτοιμη. Δημιουργήστε έναν one-time pairing code στον Broker και εισάγετέ τον μία φορά εδώ."
@@ -2144,6 +2597,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
     settings_html = ""
     agent_html = ""
     canary_html = ""
+    persistent_html = ""
     if identity is not None:
         enrollment_verified = (
             enrollment.get("verified") is True
@@ -2159,7 +2613,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
             enrollment_label = "Δεν έχει εκτελεστεί ακόμη"
         enrollment_time = fmt_epoch(enrollment.get("verified_at")) if enrollment_verified else "—"
         enrollment_hint = enrollment.get("source_fingerprint_hint") if enrollment_verified else "—"
-        disabled = "" if overall else " disabled"
+        disabled = "" if (overall and not PERSISTENT_WORKER_ACTIVE and not CANARY_WORKER_ACTIVE) else " disabled"
         enrollment_html = f"""
 <section class="pairbox">
 <h2>Enrollment authorization check</h2>
@@ -2316,11 +2770,11 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         cid_binding = 'Ναι' if canary_current and canary_state.get('identity_binding_verified') else ('Θα δημιουργηθεί' if canary_current and cid_mode == 'seed' else '—')
         cid_generation = str(canary_state.get('identity_generation') or 0) if canary_current else '—'
         cid_runs = str(canary_state.get('identity_continuity_runs') or 0) if canary_current else '—'
-        canary_disabled = ' disabled' if (not overall or CANARY_WORKER_ACTIVE) else ''
+        canary_disabled = ' disabled' if (not overall or CANARY_WORKER_ACTIVE or PERSISTENT_WORKER_ACTIVE) else ''
         canary_html = f"""
 <section class="pairbox">
 <h2>MeshAgent identity continuity canary</h2>
-<p>Εκτελεί την πλήρη verified αλυσίδα της 3.7.0 και foreground MeshAgent έως 45″. Στην πρώτη επιτυχή εκτέλεση αποθηκεύει μόνο το προστατευμένο <code>meshagent.db</code> της MeshCentral ταυτότητας. Στις επόμενες εκτελέσεις απαιτεί να ταιριάζει με το ίδιο Installation ID, Broker identity και verified .msh ώστε να επαναχρησιμοποιείται το ίδιο MeshCentral node. Δεν χρησιμοποιείται <code>-install</code>, δεν δημιουργείται service και <strong>δεν εξουσιοδοτούνται Desktop / Terminal / Files</strong>.</p>
+<p>Διατηρεί διαθέσιμο το ήδη επαληθευμένο 3.7.x identity-continuity canary για διαγνωστικό έλεγχο έως 45″. Στην πρώτη επιτυχή εκτέλεση αποθηκεύει μόνο το προστατευμένο <code>meshagent.db</code> της MeshCentral ταυτότητας. Στις επόμενες εκτελέσεις απαιτεί να ταιριάζει με το ίδιο Installation ID, Broker identity και verified .msh ώστε να επαναχρησιμοποιείται το ίδιο MeshCentral node. Δεν χρησιμοποιείται <code>-install</code>, δεν δημιουργείται service και <strong>δεν εξουσιοδοτούνται Desktop / Terminal / Files</strong>.</p>
 <div class="mini-grid">
 <div><span>Κατάσταση</span><strong>{esc(canary_label)}</strong></div>
 <div><span>Έναρξη</span><strong>{esc(cstart)}</strong></div>
@@ -2343,13 +2797,76 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </form>
 </section>"""
 
+
+    if identity is not None:
+        pcurrent = (
+            persistent_state.get('client_version') == VERSION and persistent_state.get('architecture') == ARCH
+            and persistent_state.get('installation_id') == identity['installation_id'] and persistent_state.get('node_id') == identity['node_id']
+        )
+        pstatus = persistent_state.get('status') if pcurrent else 'not_run'
+        if PERSISTENT_WORKER_ACTIVE and pstatus in {'not_run','reported','stopped','failed'}:
+            pstatus = 'starting'
+        if pstatus == 'preparing': plabel = 'PREPARING — ανανεώνεται verified chain / authorization'
+        elif pstatus == 'starting': plabel = 'STARTING — προετοιμάζεται continuous foreground runtime'
+        elif pstatus == 'running': plabel = 'RUNNING — το σταθερό MeshCentral node διατηρείται online'
+        elif pstatus == 'reconnecting': plabel = 'RECONNECTING — ελεγχόμενη επανασύνδεση στο ίδιο node'
+        elif pstatus == 'stopping': plabel = 'STOPPING — ασφαλής τερματισμός σε εξέλιξη'
+        elif pstatus == 'reported': plabel = 'STOPPED — ολοκληρώθηκε και αναφέρθηκε στον Broker'
+        elif pstatus == 'stopped': plabel = 'STOPPED — ολοκληρώθηκε, η τελική αναφορά δεν επιβεβαιώθηκε'
+        elif pstatus == 'failed': plabel = 'FAILED — ελέγξτε reason/logs πριν από νέα εκκίνηση'
+        else: plabel = 'Δεν έχει ξεκινήσει ακόμη'
+        pstart = fmt_epoch(persistent_state.get('started_at')) if pcurrent else '—'
+        pend = fmt_epoch(persistent_state.get('ended_at')) if pcurrent else '—'
+        phealth = persistent_state.get('health_state') if pcurrent else '—'
+        preason = persistent_state.get('last_reason') if pcurrent else '—'
+        pwatch = fmt_epoch(persistent_state.get('last_watch_at')) if pcurrent else '—'
+        phealth_at = fmt_epoch(persistent_state.get('last_health_at')) if pcurrent else '—'
+        please = fmt_epoch(persistent_state.get('runtime_lease_expires_at')) if pcurrent else '—'
+        prenewals = str(persistent_state.get('lease_renewals') or 0) if pcurrent else '0'
+        preconnects = str(persistent_state.get('reconnect_count') or 0) if pcurrent else '0'
+        plabel_node = persistent_state.get('agent_label') if pcurrent else (mesh_identity_status.get('agent_label') or '—')
+        pclean = 'Ναι' if pcurrent and persistent_state.get('runtime_directory_deleted') else ('Όχι — runtime ενεργό' if PERSISTENT_WORKER_ACTIVE else '—')
+        identity_ready = mesh_identity_status.get('state') == 'ready'
+        pstart_disabled = ' disabled' if (not overall or not identity_ready or PERSISTENT_WORKER_ACTIVE or CANARY_WORKER_ACTIVE) else ''
+        pstop_disabled = '' if PERSISTENT_WORKER_ACTIVE else ' disabled'
+        persistent_html = f"""
+<section class="pairbox">
+<h2>Continuous Managed runtime — πρώτο live checkpoint</h2>
+<p>Χρησιμοποιεί <strong>αποκλειστικά την ήδη σταθερή MeshCentral identity</strong>, ανανεώνει βραχύβια runtime leases, ελέγχει συνεχώς τον Broker και αναφέρει health. Όσο οι άδειες παραμένουν έγκυρες, το ίδιο node μπορεί να μένει online χωρίς χρονικό canary limit. Αν χαθεί local policy, subscription/server authorization ή runtime lease, σταματά fail-closed. Στην 3.8.0 η πρώτη εκκίνηση παραμένει <strong>χειροκίνητη για ελεγχόμενο live QA</strong>· δεν ξεκινά MeshAgent μόνο και μόνο επειδή έγινε update.</p>
+<div class="mini-grid">
+<div><span>Κατάσταση</span><strong>{esc(plabel)}</strong></div>
+<div><span>Έναρξη</span><strong>{esc(pstart)}</strong></div>
+<div><span>Λήξη</span><strong>{esc(pend)}</strong></div>
+<div><span>Health</span><strong>{esc(phealth)}</strong></div>
+<div><span>Τελευταίος λόγος</span><strong>{esc(preason)}</strong></div>
+<div><span>Expected node</span><strong>{esc(plabel_node)}</strong></div>
+<div><span>Τελευταίο server watch</span><strong>{esc(pwatch)}</strong></div>
+<div><span>Τελευταίο health report</span><strong>{esc(phealth_at)}</strong></div>
+<div><span>Runtime lease έως</span><strong>{esc(please)}</strong></div>
+<div><span>Lease renewals</span><strong>{esc(prenewals)}</strong></div>
+<div><span>Controlled reconnects</span><strong>{esc(preconnects)}</strong></div>
+<div><span>Identity mode</span><strong>reuse only</strong></div>
+<div><span>Runtime cleanup</span><strong>{esc(pclean)}</strong></div>
+<div><span>Technician actions</span><strong>NOT AUTHORIZED</strong></div>
+<div><span>Agent/service persistence</span><strong>OFF</strong></div>
+</div>
+<form method="post" action="continuous-runtime-start">
+<input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
+<button type="submit"{pstart_disabled}>Έναρξη continuous Managed runtime</button>
+</form>
+<form method="post" action="continuous-runtime-stop">
+<input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
+<button type="submit"{pstop_disabled}>Τερματισμός continuous Managed runtime</button>
+</form>
+</section>"""
+
     return f"""<!doctype html>
 <html lang="el"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Smart Pro Managed Support</title>
 <style>
 :root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;background:#10151d;color:#eef5ff;font:14px/1.5 Arial,Helvetica,sans-serif}}main{{max-width:1000px;margin:0 auto;padding:24px}}.hero{{background:#172231;border:1px solid #2c4158;border-radius:16px;padding:22px;margin-bottom:16px}}h1{{margin:0 0 5px;font-size:27px}}h2{{margin:0 0 10px;font-size:18px}}.sub{{color:#aab9ca}}.badge{{display:inline-block;margin-top:14px;padding:8px 12px;border-radius:999px;font-weight:700}}.ok{{background:#173a2a;color:#9ff0bd;border:1px solid #2c7750}}.bad{{background:#442128;color:#ffb5c0;border:1px solid #8c3d4d}}.warn{{background:#43381a;color:#ffe49a;border:1px solid #8b7331}}.note{{margin-top:15px;padding:13px 15px;border-radius:10px;background:#12293a;border:1px solid #245473;color:#cfeeff}}.notice{{margin:0 0 16px;padding:12px 14px;border-radius:10px}}.notice-ok{{background:#173a2a;border:1px solid #2c7750;color:#bdf7d0}}.notice-bad{{background:#442128;border:1px solid #8c3d4d;color:#ffd0d6}}.notice-info{{background:#12293a;border:1px solid #245473;color:#cfeeff}}.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.card,.pairbox{{background:#171d26;border:1px solid #293646;border-radius:12px;padding:15px}}.k{{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:#8fa1b5}}.v{{font-size:15px;font-weight:700;margin-top:4px;overflow-wrap:anywhere}}.pairbox{{margin:16px 0}}.pairbox p{{color:#b7c5d5}}label{{display:block;font-weight:700;margin:12px 0 6px}}input{{width:100%;max-width:460px;padding:11px 12px;border-radius:8px;border:1px solid #3b4c60;background:#0f151d;color:#fff;font:inherit}}button{{display:block;margin-top:12px;border:0;border-radius:8px;padding:10px 14px;background:#19aee8;color:#06131b;font-weight:800;cursor:pointer}}button:disabled,input:disabled{{opacity:.5;cursor:not-allowed}}code{{color:#9fdfff}}.mini-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.mini-grid div{{background:#111821;border:1px solid #28384a;border-radius:9px;padding:10px}}.mini-grid span{{display:block;color:#8fa1b5;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}}.mini-grid strong{{overflow-wrap:anywhere}}.footer{{margin-top:18px;color:#7f91a6;font-size:12px}}@media(max-width:650px){{main{{padding:14px}}.grid,.mini-grid{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.7.0 · Stable MeshAgent Identity Canary · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
+<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.8.0 · Continuous Foreground Runtime Consumer · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
 {notice_html}
 {pair_html}
 {enrollment_html}
@@ -2357,6 +2874,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 {agent_html}
 {runtime_html}
 {canary_html}
+{persistent_html}
 <section class="grid">
 <div class="card"><div class="k">Installation ID</div><div class="v">{esc(policy.get('installation_id') or (identity or {}).get('installation_id'))}</div></div>
 <div class="card"><div class="k">Smart Pro Tools</div><div class="v">v{esc((policy.get('source') or {}).get('addon_version'))} · Online: {esc(tools_online)}</div></div>
@@ -2370,14 +2888,14 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <div class="card"><div class="k">Τελευταίο Broker heartbeat</div><div class="v">{esc(fmt_epoch(server.get('last_heartbeat_at')))}</div></div>
 <div class="card"><div class="k">Authorization chain</div><div class="v">{esc(overall_text)}</div></div>
 <div class="card"><div class="k">MeshCentral stable identity</div><div class="v">{esc(mesh_identity_label)} · generation {esc(mesh_identity_generation)} · runs {esc(mesh_identity_runs)} · DB {esc(mesh_identity_db_hint)} · {esc(mesh_identity_updated)}</div></div>
-<div class="card"><div class="k">Remote access</div><div class="v">Όχι — technician actions δεν είναι εξουσιοδοτημένες (identity continuity canary μόνο)</div></div>
+<div class="card"><div class="k">Remote access</div><div class="v">Όχι — το node μπορεί να είναι online, αλλά web/Terminal/Files technician actions παραμένουν NOT AUTHORIZED</div></div>
 </section>
-<div class="footer">3.7.0 stable-identity canary client. Η κανονική λειτουργία παραμένει fail-closed. Μόνο το χειροκίνητο canary μπορεί να εκτελέσει foreground MeshAgent έως 45″, χωρίς -install/service persistence και χωρίς authorization για Desktop/Terminal/Files.</div>
+<div class="footer">3.8.0 continuous foreground runtime consumer. Η εκκίνηση είναι χειροκίνητη μόνο για το πρώτο live QA checkpoint. Ο MeshAgent παραμένει foreground, χωρίς -install/service persistence. Η online παρουσία του node δεν εξουσιοδοτεί web/Terminal/Files/Desktop.</div>
 </main></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SmartProManaged/3.7.0"
+    server_version = "SmartProManaged/3.8.0"
 
     def _send(self, code, body, content_type):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
@@ -2424,10 +2942,15 @@ class Handler(BaseHTTPRequestHandler):
                 "agent_binary_architecture": load_agent_state().get("architecture") or "",
                 "runtime_lease_dry_run_status": load_runtime_state().get("status") or "not_run",
                 "runtime_lease_renewed_once": bool(load_runtime_state().get("verified")),
-                "runtime_execution": False,
-                "runtime_meshcentral": False,
+                "runtime_execution": bool(PERSISTENT_WORKER_ACTIVE),
+                "runtime_meshcentral": bool(PERSISTENT_WORKER_ACTIVE),
                 "connectivity_canary_status": load_canary_state().get("status") or "not_run",
                 "connectivity_canary_verified": bool(load_canary_state().get("verified")),
+                "continuous_runtime_status": load_persistent_state().get("status") or "not_run",
+                "continuous_runtime_active": bool(PERSISTENT_WORKER_ACTIVE),
+                "continuous_runtime_health": load_persistent_state().get("health_state") or "",
+                "continuous_runtime_lease_renewals": load_persistent_state().get("lease_renewals") or 0,
+                "continuous_runtime_reconnects": load_persistent_state().get("reconnect_count") or 0,
                 "technician_actions_authorized": False,
                 "installation_id": policy.get("installation_id") or server.get("installation_id"),
             }
@@ -2443,7 +2966,9 @@ class Handler(BaseHTTPRequestHandler):
         is_agent = path.endswith("/agent-check") or path == "agent-check"
         is_runtime = path.endswith("/runtime-lease-check") or path == "runtime-lease-check"
         is_canary = path.endswith("/identity-continuity-canary") or path == "identity-continuity-canary"
-        if not is_pair and not is_enrollment and not is_settings and not is_agent and not is_runtime and not is_canary:
+        is_persistent_start = path.endswith("/continuous-runtime-start") or path == "continuous-runtime-start"
+        is_persistent_stop = path.endswith("/continuous-runtime-stop") or path == "continuous-runtime-stop"
+        if not is_pair and not is_enrollment and not is_settings and not is_agent and not is_runtime and not is_canary and not is_persistent_start and not is_persistent_stop:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
         length = _as_int(self.headers.get("Content-Length")) or 0
@@ -2458,6 +2983,9 @@ class Handler(BaseHTTPRequestHandler):
         csrf = _safe_str((form.get("csrf") or [""])[0], 100)
         if not secrets.compare_digest(csrf, CSRF_TOKEN):
             self._send(403, render_page(read_policy(), "Η φόρμα ενεργοποίησης έληξε. Ανανεώστε τη σελίδα.", "bad"), "text/html; charset=utf-8")
+            return
+        if PERSISTENT_WORKER_ACTIVE and not is_persistent_stop:
+            self._send(409, render_page(read_policy(), "Η continuous Managed λειτουργία είναι ενεργή. Επιτρέπεται μόνο ασφαλής τερματισμός μέχρι να ολοκληρωθεί το runtime.", "bad"), "text/html; charset=utf-8")
             return
         if is_pair:
             if load_identity() is not None:
@@ -2517,6 +3045,24 @@ class Handler(BaseHTTPRequestHandler):
                 )
             return
 
+        if is_persistent_start:
+            try:
+                start_persistent_runtime()
+                self._send(202, render_page(read_policy(), "Η continuous Managed λειτουργία ξεκίνησε στο παρασκήνιο. Παρατηρήστε στο MeshCentral ότι ενεργοποιείται η ΙΔΙΑ σταθερή συσκευή. Μην ανοίξετε web/Terminal/Files· technician actions παραμένουν κλειστά. Κάντε refresh εδώ μετά από περίπου 60–90 δευτερόλεπτα.", "info"), "text/html; charset=utf-8")
+            except RuntimeError as exc:
+                message = str(exc).partition('|')[2] or "Δεν ήταν δυνατή η εκκίνηση της continuous Managed λειτουργίας."
+                self._send(409, render_page(read_policy(), message, "bad"), "text/html; charset=utf-8")
+            return
+
+        if is_persistent_stop:
+            try:
+                stop_persistent_runtime()
+                self._send(202, render_page(read_policy(), "Ζητήθηκε ασφαλής τερματισμός της continuous Managed λειτουργίας. Περιμένετε λίγα δευτερόλεπτα και κάντε refresh για το τελικό report/cleanup.", "info"), "text/html; charset=utf-8")
+            except RuntimeError as exc:
+                message = str(exc).partition('|')[2] or "Δεν υπάρχει ενεργή continuous Managed λειτουργία."
+                self._send(409, render_page(read_policy(), message, "bad"), "text/html; charset=utf-8")
+            return
+
         if is_canary:
             try:
                 start_connectivity_canary()
@@ -2573,9 +3119,9 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"[managed] Smart Pro Managed Support {VERSION} stable MeshAgent identity canary client listening on {PORT}", flush=True)
+    print(f"[managed] Smart Pro Managed Support {VERSION} continuous foreground runtime consumer listening on {PORT}", flush=True)
     boot_identity = get_mesh_identity_status(load_identity())
-    print(f"[managed] mesh identity state={boot_identity.get('state')} generation={boot_identity.get('generation', 0)} continuity_runs={boot_identity.get('continuity_runs', 0)}; no secret material logged", flush=True)
+    print(f"[managed] mesh identity state={boot_identity.get('state')} generation={boot_identity.get('generation', 0)} continuity_runs={boot_identity.get('continuity_runs', 0)}; continuous runtime does not auto-start in 3.8.0 QA checkpoint", flush=True)
     thread = threading.Thread(target=heartbeat_worker, name="managed-heartbeat", daemon=True)
     thread.start()
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

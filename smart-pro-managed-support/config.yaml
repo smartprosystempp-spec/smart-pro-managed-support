@@ -1,6 +1,6 @@
 name: "Smart Pro Managed Support"
-description: "Stable MeshAgent Identity Canary. Διατηρεί ελεγχόμενα το meshagent.db ώστε η ίδια εγκατάσταση να επαναχρησιμοποιεί το ίδιο MeshCentral node, χωρίς -install/service persistence και χωρίς technician actions."
-version: "3.7.0"
+description: "Continuous Foreground Runtime Consumer. Επαναχρησιμοποιεί την αποδεδειγμένα σταθερή MeshCentral identity, ανανεώνει runtime lease, κάνει continuous server watch/health και controlled reconnect, χωρίς -install/service persistence και χωρίς technician actions."
+version: "3.8.0"
 slug: "smart_pro_managed_support"
 arch:
   - aarch64

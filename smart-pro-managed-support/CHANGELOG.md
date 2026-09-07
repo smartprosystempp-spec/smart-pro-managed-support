@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.8.0 — Continuous Foreground Runtime Consumer
+- Requires already-proven stable MeshAgent identity from 3.7.0; seed is forbidden.
+- Consumes Broker 0.32.0 persistent-runtime contract.
+- Renewable runtime lease + continuous watch + health reporting.
+- Bounded controlled reconnect using the same node identity.
+- Fail-closed stop on local policy/server authorization/runtime lease loss.
+- First live QA remains manual start/stop; update alone does not launch MeshAgent.
+- Technician actions remain NOT AUTHORIZED; no `-install` or service persistence.
+
+
 ## 3.7.0 — Stable MeshAgent Identity Canary
 
 - Adds a protected persistent MeshAgent identity store under private `/data`.
