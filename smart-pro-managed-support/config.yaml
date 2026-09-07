@@ -1,6 +1,6 @@
 name: "Smart Pro Managed Support"
-description: "Dual Authorization Foundation. Συνδυάζει read-only Smart Pro Tools policy με authenticated Broker identity + server authorization lease, χωρίς MeshAgent ή remote access στην 3.1.0."
-version: "3.1.0"
+description: "Enrollment Authorization Consumer. Επαληθεύει one-time Broker enrollment authorization πάνω στο dual authorization chain, χωρίς .msh, MeshAgent ή remote access στην 3.2.0."
+version: "3.2.0"
 slug: "smart_pro_managed_support"
 arch:
   - aarch64

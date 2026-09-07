@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.2.0 — Enrollment Authorization Consumer
+- Preserves the complete 3.1.0 local policy + Broker identity + server-authorization chain.
+- Adds a controlled manual enrollment authorization check against Broker 0.27.0+.
+- Requires local policy ALLOWED, active Managed identity and a live server authorization lease before requesting enrollment authorization.
+- Requests a one-time `SPMB-*` bootstrap/enrollment ticket, validates the response contract, and immediately consumes the same ticket.
+- Validates Installation ID, node identity, architecture/client binding, source fingerprint hint continuity and server authorization validity.
+- Requires Broker responses to keep `.msh delivery`, Agent delivery, execution and remote access explicitly false.
+- The one-time ticket is held only in memory during request/consume; it is never persisted or logged.
+- Persists only a non-secret verification record: timestamp, Installation ID, node ID, client/architecture, server-valid-until and 12-character source fingerprint hint.
+- No `.msh` is requested or stored.
+- No MeshAgent is downloaded, chmodded or executed.
+- No MeshCentral node or remote access is created.
+
 ## 3.1.0 — Dual Authorization Foundation
 - Keeps Smart Pro Tools Managed Policy Contract v1 as the local, read-only authorization gate.
 - Adds one-time Managed identity pairing through the existing Broker identity contract.
