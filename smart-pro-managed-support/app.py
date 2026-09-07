@@ -21,7 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.6.0")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.6.1")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -1922,7 +1922,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
     else:
         runtime_html = ""
 
-
+    if identity is not None:
         canary_current = (
             canary_state.get('client_version') == VERSION and canary_state.get('architecture') == ARCH
             and canary_state.get('installation_id') == identity['installation_id'] and canary_state.get('node_id') == identity['node_id']
@@ -1944,7 +1944,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         canary_html = f"""
 <section class="pairbox">
 <h2>MeshAgent connectivity canary</h2>
-<p>Εκτελεί την πλήρη verified αλυσίδα της 3.6.0, αποκτά runtime lease + one-time execution canary και ξεκινά <strong>μόνο foreground MeshAgent connectivity</strong> για έως 45″. Δεν χρησιμοποιείται <code>-install</code>, δεν δημιουργείται service και <strong>δεν εξουσιοδοτούνται Desktop / Terminal / Files</strong>. Το private runtime directory διαγράφεται στο τέλος.</p>
+<p>Εκτελεί την πλήρη verified αλυσίδα της 3.6.1, αποκτά runtime lease + one-time execution canary και ξεκινά <strong>μόνο foreground MeshAgent connectivity</strong> για έως 45″. Δεν χρησιμοποιείται <code>-install</code>, δεν δημιουργείται service και <strong>δεν εξουσιοδοτούνται Desktop / Terminal / Files</strong>. Το private runtime directory διαγράφεται στο τέλος.</p>
 <div class="mini-grid">
 <div><span>Κατάσταση</span><strong>{esc(canary_label)}</strong></div>
 <div><span>Έναρξη</span><strong>{esc(cstart)}</strong></div>
@@ -1968,7 +1968,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <style>
 :root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;background:#10151d;color:#eef5ff;font:14px/1.5 Arial,Helvetica,sans-serif}}main{{max-width:1000px;margin:0 auto;padding:24px}}.hero{{background:#172231;border:1px solid #2c4158;border-radius:16px;padding:22px;margin-bottom:16px}}h1{{margin:0 0 5px;font-size:27px}}h2{{margin:0 0 10px;font-size:18px}}.sub{{color:#aab9ca}}.badge{{display:inline-block;margin-top:14px;padding:8px 12px;border-radius:999px;font-weight:700}}.ok{{background:#173a2a;color:#9ff0bd;border:1px solid #2c7750}}.bad{{background:#442128;color:#ffb5c0;border:1px solid #8c3d4d}}.warn{{background:#43381a;color:#ffe49a;border:1px solid #8b7331}}.note{{margin-top:15px;padding:13px 15px;border-radius:10px;background:#12293a;border:1px solid #245473;color:#cfeeff}}.notice{{margin:0 0 16px;padding:12px 14px;border-radius:10px}}.notice-ok{{background:#173a2a;border:1px solid #2c7750;color:#bdf7d0}}.notice-bad{{background:#442128;border:1px solid #8c3d4d;color:#ffd0d6}}.notice-info{{background:#12293a;border:1px solid #245473;color:#cfeeff}}.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.card,.pairbox{{background:#171d26;border:1px solid #293646;border-radius:12px;padding:15px}}.k{{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:#8fa1b5}}.v{{font-size:15px;font-weight:700;margin-top:4px;overflow-wrap:anywhere}}.pairbox{{margin:16px 0}}.pairbox p{{color:#b7c5d5}}label{{display:block;font-weight:700;margin:12px 0 6px}}input{{width:100%;max-width:460px;padding:11px 12px;border-radius:8px;border:1px solid #3b4c60;background:#0f151d;color:#fff;font:inherit}}button{{display:block;margin-top:12px;border:0;border-radius:8px;padding:10px 14px;background:#19aee8;color:#06131b;font-weight:800;cursor:pointer}}button:disabled,input:disabled{{opacity:.5;cursor:not-allowed}}code{{color:#9fdfff}}.mini-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.mini-grid div{{background:#111821;border:1px solid #28384a;border-radius:9px;padding:10px}}.mini-grid span{{display:block;color:#8fa1b5;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}}.mini-grid strong{{overflow-wrap:anywhere}}.footer{{margin-top:18px;color:#7f91a6;font-size:12px}}@media(max-width:650px){{main{{padding:14px}}.grid,.mini-grid{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.6.0 · Foreground MeshAgent Connectivity Canary · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
+<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.6.1 · Foreground MeshAgent Connectivity Canary UI Hotfix · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
 {notice_html}
 {pair_html}
 {enrollment_html}
@@ -1990,12 +1990,12 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <div class="card"><div class="k">Authorization chain</div><div class="v">{esc(overall_text)}</div></div>
 <div class="card"><div class="k">Remote access</div><div class="v">Όχι — technician actions δεν είναι εξουσιοδοτημένες (connectivity canary μόνο)</div></div>
 </section>
-<div class="footer">3.6.0 connectivity-canary client. Η κανονική λειτουργία παραμένει fail-closed. Μόνο το χειροκίνητο canary μπορεί να εκτελέσει foreground MeshAgent έως 45″, χωρίς -install/service persistence και χωρίς authorization για Desktop/Terminal/Files.</div>
+<div class="footer">3.6.1 connectivity-canary client. Η κανονική λειτουργία παραμένει fail-closed. Μόνο το χειροκίνητο canary μπορεί να εκτελέσει foreground MeshAgent έως 45″, χωρίς -install/service persistence και χωρίς authorization για Desktop/Terminal/Files.</div>
 </main></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SmartProManaged/3.6.0"
+    server_version = "SmartProManaged/3.6.1"
 
     def _send(self, code, body, content_type):
         data = body if isinstance(body, bytes) else body.encode("utf-8")

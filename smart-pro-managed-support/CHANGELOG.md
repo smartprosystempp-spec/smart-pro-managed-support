@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.6.1 — Connectivity Canary UI Hotfix
+
+- Διορθώνει μόνο την εμφάνιση της ενότητας `MeshAgent connectivity canary` στο Ingress UI.
+- Στην 3.6.0 το canary HTML block βρισκόταν κατά λάθος μέσα στο `else` του unpaired runtime branch, οπότε σε paired εγκατάσταση δεν αποδιδόταν ποτέ.
+- Δεν αλλάζει το connectivity-canary worker, Broker contract, execution boundaries, runtime lease, `.msh`, MeshAgent verification ή cleanup logic.
+- Δεν απαιτεί re-pairing.
+
 ## 3.6.0 — Foreground MeshAgent Connectivity Canary
 
 - Πρώτη πραγματική Managed 3.x foreground εκτέλεση MeshAgent, μόνο μετά από πλήρη fresh verified chain και Broker 0.31.0 execution-canary authorization.

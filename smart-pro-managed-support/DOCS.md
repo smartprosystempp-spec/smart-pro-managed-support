@@ -1,7 +1,7 @@
-# Smart Pro Managed Support — 3.6.0 Controlled Canary QA
+# Smart Pro Managed Support — 3.6.1 Controlled Canary QA
 
 1. Broker 0.31.0 πρέπει να είναι ήδη PASS.
-2. Update 3.5.0 → 3.6.0 χωρίς uninstall/re-pairing.
+2. Update 3.5.0 → 3.6.1 χωρίς uninstall/re-pairing.
 3. Επιβεβαίωσε Managed authorization ALLOWED και Remote access = Όχι.
 4. Άνοιξε MeshCentral σε δεύτερο tab ΠΡΙΝ το canary.
 5. Πάτησε μία φορά «Έναρξη connectivity canary ≤45″».
