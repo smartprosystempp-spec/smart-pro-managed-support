@@ -1,22 +1,21 @@
-# Smart Pro Managed Support 3.2.0
+# Smart Pro Managed Support 3.3.0
 
-Authorization-only Home Assistant add-on for the subscription Managed Remote Support architecture.
+## Secure Settings Verification Consumer
 
-## Active in 3.2.0
-- Read-only Smart Pro Tools policy from `/share/smart-pro-system/managed-policy.json`.
-- One-time pairing with Smart Pro Remote Session Broker 0.26.0+.
-- Persistent Managed node identity under the add-on private `/data` directory.
-- Authenticated heartbeat every 60 seconds.
-- Server Authorization Contract v1 with a bounded lease (server maximum 180 seconds).
-- Overall authorization requires both local policy and server authorization.
+Η 3.3.0 είναι το επόμενο ελεγχόμενο βήμα μετά το verified 3.2.0 enrollment authorization.
 
-## Still disabled
-- `.msh` delivery
-- MeshAgent download or execution
-- MeshCentral connection/node creation
-- Remote desktop/terminal/files/tunnel
-- Any host service installation or persistence
+Ενεργά:
+- Smart Pro Tools Managed Policy Contract v1 (read-only),
+- Broker Managed identity + authenticated heartbeat,
+- Portal-backed Server Authorization Contract v1,
+- fresh one-time enrollment authorization bound to 3.3.0,
+- one-time Managed 3.x secure settings request/consume,
+- local verification του `.msh`: exact SHA-256, exact byte count, required MeshCentral fields, WSS endpoint και opaque `SPMNG-*` node label.
 
-
-## 3.2.0 Enrollment Authorization Consumer
-Η έκδοση 3.2.0 προσθέτει μόνο ελεγχόμενο one-time enrollment authorization request/consume προς Broker 0.27.0+. Δεν ζητά ή αποθηκεύει `.msh`, δεν κατεβάζει/εκτελεί MeshAgent και δεν ενεργοποιεί MeshCentral ή remote access.
+Security boundary:
+- το raw settings ticket δεν αποθηκεύεται ούτε γράφεται σε log,
+- το raw `.msh` επαληθεύεται στη μνήμη και δεν αποθηκεύεται,
+- αποθηκεύονται μόνο non-secret verification metadata/hints,
+- δεν γίνεται MeshAgent download, chmod ή execution,
+- δεν δημιουργείται MeshCentral node,
+- remote access παραμένει OFF.

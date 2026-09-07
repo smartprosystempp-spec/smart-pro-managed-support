@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+import base64
+import binascii
+import hashlib
 import html
 import json
 import os
@@ -13,7 +16,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.2.0")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.3.0")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -24,6 +27,7 @@ POLICY_FILE = Path("/share/smart-pro-system/managed-policy.json")
 DATA_DIR = Path("/data")
 IDENTITY_FILE = DATA_DIR / "managed-identity.json"
 ENROLLMENT_STATE_FILE = DATA_DIR / "enrollment-authorization.json"
+SETTINGS_STATE_FILE = DATA_DIR / "settings-verification.json"
 EXPECTED_CONTRACT = "smart-pro-managed-policy-v1"
 EXPECTED_POLICY_VERSION = 1
 EXPECTED_SERVER_AUTH_VERSION = 1
@@ -35,6 +39,9 @@ HTTP_TIMEOUT = 12
 NODE_ID_RE = re.compile(r"^SPMN-[A-F0-9]{32}$")
 NODE_SECRET_RE = re.compile(r"^SPMS-[A-Za-z0-9_-]{43}$")
 BOOTSTRAP_TICKET_RE = re.compile(r"^SPMB-[A-Za-z0-9_-]{43}$")
+SETTINGS_TICKET_RE = re.compile(r"^SPMD-[A-Za-z0-9_-]{43}$")
+SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
+AGENT_LABEL_RE = re.compile(r"^SPMNG-[A-F0-9]{16}$")
 FINGERPRINT_HINT_RE = re.compile(r"^[a-f0-9]{12}$")
 CSRF_TOKEN = secrets.token_urlsafe(24)
 STATE_LOCK = threading.RLock()
@@ -573,6 +580,221 @@ def verify_enrollment_authorization():
     return state
 
 
+
+
+def load_settings_state():
+    try:
+        if not SETTINGS_STATE_FILE.exists():
+            return {}
+        if SETTINGS_STATE_FILE.stat().st_size <= 0 or SETTINGS_STATE_FILE.stat().st_size > 16384:
+            return {}
+        data = json.loads(SETTINGS_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    hint = _safe_str(data.get("source_fingerprint_hint"), 20).lower()
+    sha_hint = _safe_str(data.get("sha256_hint"), 20).lower()
+    agent_label = _safe_str(data.get("agent_label"), 40).upper()
+    if hint and not FINGERPRINT_HINT_RE.fullmatch(hint):
+        return {}
+    if sha_hint and not re.fullmatch(r"^[a-f0-9]{12}$", sha_hint):
+        return {}
+    if agent_label and not AGENT_LABEL_RE.fullmatch(agent_label):
+        return {}
+    return {
+        "verified": data.get("verified") is True,
+        "verified_at": _as_int(data.get("verified_at")) or 0,
+        "consumed_at": _as_int(data.get("consumed_at")) or 0,
+        "server_valid_until": _as_int(data.get("server_valid_until")) or 0,
+        "source_fingerprint_hint": hint,
+        "sha256_hint": sha_hint,
+        "bytes": _as_int(data.get("bytes")) or 0,
+        "agent_label": agent_label,
+        "mesh_server_host": _safe_str(data.get("mesh_server_host"), 255).lower(),
+        "installation_id": _safe_str(data.get("installation_id"), 100).upper(),
+        "node_id": _safe_str(data.get("node_id"), 64).upper(),
+        "client_version": _safe_str(data.get("client_version"), 30),
+        "architecture": _safe_str(data.get("architecture"), 20),
+    }
+
+
+def save_settings_state(state):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = SETTINGS_STATE_FILE.with_suffix(".tmp")
+    payload = json.dumps(state, ensure_ascii=False, separators=(",", ":"))
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, SETTINGS_STATE_FILE)
+        os.chmod(SETTINGS_STATE_FILE, 0o600)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
+def parse_msh_strict(raw_bytes):
+    if not isinstance(raw_bytes, (bytes, bytearray)) or len(raw_bytes) < 20 or len(raw_bytes) > 262144:
+        raise RuntimeError("settings_payload_size_invalid|Το .msh έχει μη αποδεκτό μέγεθος.")
+    if b"\x00" in raw_bytes:
+        raise RuntimeError("settings_payload_binary_invalid|Το .msh περιέχει μη αναμενόμενα binary δεδομένα.")
+    try:
+        text = bytes(raw_bytes).decode("utf-8")
+    except UnicodeDecodeError:
+        raise RuntimeError("settings_payload_encoding_invalid|Το .msh δεν είναι έγκυρο UTF-8 κείμενο.") from None
+    fields = {}
+    for line in re.split(r"\r\n|\r|\n", text):
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        key, value = [part.strip() for part in line.split("=", 1)]
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", key):
+            continue
+        if key in fields:
+            raise RuntimeError("settings_payload_duplicate_key|Το .msh περιέχει διπλό κρίσιμο πεδίο.")
+        fields[key] = value
+    for key in ("MeshName", "MeshType", "MeshID", "ServerID", "MeshServer", "agentName"):
+        if not fields.get(key):
+            raise RuntimeError("settings_payload_required_field_missing|Το .msh δεν περιέχει όλα τα απαιτούμενα πεδία.")
+    return fields
+
+
+def verify_secure_settings():
+    """Fresh 3.3.0 enrollment -> one-time settings request/consume -> local verification.
+    Raw ticket and raw .msh are never persisted or logged.
+    """
+    snapshot = read_policy()
+    identity = load_identity()
+    server = get_server_state()
+    if identity is None:
+        raise RuntimeError("not_paired|Απαιτείται ενεργή Managed identity πριν από τη λήψη ρυθμίσεων.")
+    if not snapshot.get("allowed_local"):
+        raise RuntimeError("local_policy_denied|Η τοπική Managed πολιτική δεν επιτρέπει λήψη ρυθμίσεων αυτή τη στιγμή.")
+    server_valid_until = _as_int(server.get("valid_until")) or 0
+    if server.get("authorized_server") is not True or server_valid_until <= now_ts():
+        raise RuntimeError("server_authorization_required|Απαιτείται ενεργό Broker Server Authorization πριν από τη λήψη ρυθμίσεων.")
+
+    enrollment = verify_enrollment_authorization()
+    if enrollment.get("client_version") != VERSION or enrollment.get("architecture") != ARCH:
+        raise RuntimeError("enrollment_binding_invalid|Ο νέος enrollment έλεγχος δεν δέθηκε στη σωστή έκδοση/αρχιτεκτονική.")
+
+    common = {
+        "node_id": identity["node_id"],
+        "node_secret": identity["node_secret"],
+        "client_version": VERSION,
+        "architecture": ARCH,
+    }
+    request_data = broker_post("/managed/settings/request", common)
+    ticket = _safe_str(request_data.get("settings_ticket"), 80)
+    source_hint = _safe_str(request_data.get("source_fingerprint_hint"), 20).lower()
+    expected_sha = _safe_str(request_data.get("expected_sha256"), 80).lower()
+    expected_bytes = _as_int(request_data.get("expected_bytes")) or 0
+    agent_label = _safe_str(request_data.get("agent_label"), 40).upper()
+    expires_at = parse_iso_epoch(request_data.get("expires_at"))
+    request_server_until = parse_iso_epoch(request_data.get("server_valid_until"))
+    request_ok = (
+        request_data.get("success") is True
+        and request_data.get("mode") == "managed_support"
+        and request_data.get("phase") == "managed3_secure_settings_delivery"
+        and request_data.get("settings_contract") == "smart-pro-managed-settings-v1"
+        and request_data.get("settings_delivery_authorized") is True
+        and request_data.get("settings_delivered") is False
+        and request_data.get("server_authorization") == "allowed"
+        and request_data.get("agent_delivery") is False
+        and request_data.get("execution") is False
+        and request_data.get("remote_access") is False
+        and SETTINGS_TICKET_RE.fullmatch(ticket) is not None
+        and FINGERPRINT_HINT_RE.fullmatch(source_hint) is not None
+        and secrets.compare_digest(source_hint, enrollment.get("source_fingerprint_hint") or "")
+        and SHA256_RE.fullmatch(expected_sha) is not None
+        and 20 <= expected_bytes <= 262144
+        and AGENT_LABEL_RE.fullmatch(agent_label) is not None
+        and expires_at > now_ts()
+        and request_server_until > now_ts()
+        and expires_at <= request_server_until
+    )
+    if not request_ok:
+        raise RuntimeError("settings_request_contract_invalid|Ο Broker επέστρεψε μη έγκυρο secure settings contract.")
+
+    consume_payload = dict(common)
+    consume_payload["settings_ticket"] = ticket
+    consume_data = broker_post("/managed/settings/consume", consume_payload)
+    settings = consume_data.get("settings") if isinstance(consume_data.get("settings"), dict) else {}
+    consume_hint = _safe_str(consume_data.get("source_fingerprint_hint"), 20).lower()
+    consumed_at = parse_iso_epoch(consume_data.get("consumed_at"))
+    consume_server_until = parse_iso_epoch(consume_data.get("server_valid_until"))
+    response_sha = _safe_str(settings.get("sha256"), 80).lower()
+    response_bytes = _as_int(settings.get("bytes")) or 0
+    response_label = _safe_str(settings.get("agent_label"), 40).upper()
+    encoded = settings.get("data")
+    consume_ok = (
+        consume_data.get("success") is True
+        and consume_data.get("mode") == "managed_support"
+        and consume_data.get("phase") == "managed3_secure_settings_delivery"
+        and consume_data.get("settings_contract") == "smart-pro-managed-settings-v1"
+        and _safe_str(consume_data.get("installation_ref"), 100).upper() == identity["installation_id"]
+        and consume_data.get("settings_delivery") is True
+        and consume_data.get("server_authorization") == "allowed"
+        and consume_data.get("agent_delivery") is False
+        and consume_data.get("execution") is False
+        and consume_data.get("remote_access") is False
+        and FINGERPRINT_HINT_RE.fullmatch(consume_hint) is not None
+        and secrets.compare_digest(source_hint, consume_hint)
+        and settings.get("encoding") == "base64"
+        and isinstance(encoded, str)
+        and SHA256_RE.fullmatch(response_sha) is not None
+        and secrets.compare_digest(expected_sha, response_sha)
+        and response_bytes == expected_bytes
+        and response_label == agent_label
+        and consumed_at > 0
+        and consume_server_until > now_ts()
+    )
+    if not consume_ok:
+        raise RuntimeError("settings_consume_contract_invalid|Η κατανάλωση του secure settings ticket δεν επαληθεύτηκε.")
+
+    try:
+        raw = base64.b64decode(encoded.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, binascii.Error, ValueError):
+        raise RuntimeError("settings_base64_invalid|Ο Broker επέστρεψε μη έγκυρο base64 .msh payload.") from None
+    actual_sha = hashlib.sha256(raw).hexdigest()
+    if len(raw) != expected_bytes or not secrets.compare_digest(actual_sha, expected_sha):
+        raise RuntimeError("settings_integrity_mismatch|Το .msh απέτυχε στον τοπικό έλεγχο ακεραιότητας.")
+    fields = parse_msh_strict(raw)
+    if not secrets.compare_digest(_safe_str(fields.get("agentName"), 40).upper(), agent_label):
+        raise RuntimeError("settings_agent_label_mismatch|Το .msh δεν περιέχει το αναμενόμενο opaque Managed node label.")
+    parsed = urlparse(_safe_str(fields.get("MeshServer"), 2048))
+    if parsed.scheme.lower() != "wss" or not parsed.hostname or parsed.username or parsed.password:
+        raise RuntimeError("settings_meshserver_invalid|Το .msh δεν περιέχει έγκυρο ασφαλές WSS MeshServer endpoint.")
+
+    state = {
+        "verified": True,
+        "verified_at": now_ts(),
+        "consumed_at": consumed_at,
+        "server_valid_until": consume_server_until,
+        "source_fingerprint_hint": consume_hint,
+        "sha256_hint": actual_sha[:12],
+        "bytes": len(raw),
+        "agent_label": agent_label,
+        "mesh_server_host": parsed.hostname.lower(),
+        "installation_id": identity["installation_id"],
+        "node_id": identity["node_id"],
+        "client_version": VERSION,
+        "architecture": ARCH,
+    }
+    save_settings_state(state)
+    print(
+        f"[managed] secure settings verified for {identity['installation_id']} "
+        f"source_hint={consume_hint} sha_hint={actual_sha[:12]} bytes={len(raw)}; raw settings not stored",
+        flush=True,
+    )
+    return state
+
 def heartbeat_worker():
     last_summary = None
     while True:
@@ -604,6 +826,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
     server = get_server_state()
     identity = load_identity()
     enrollment = load_enrollment_state()
+    settings_state = load_settings_state()
 
     local_allowed = bool(local_snapshot.get("allowed_local"))
     server_allowed = bool(server.get("authorized_server")) and (_as_int(server.get("valid_until")) or 0) > now_ts()
@@ -656,13 +879,20 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </section>'''
 
     enrollment_html = ""
+    settings_html = ""
     if identity is not None:
         enrollment_verified = (
             enrollment.get("verified") is True
             and enrollment.get("installation_id") == identity["installation_id"]
             and enrollment.get("node_id") == identity["node_id"]
         )
-        enrollment_label = "VERIFIED — ελεγχόμενο one-time consume ολοκληρώθηκε" if enrollment_verified else "Δεν έχει εκτελεστεί ακόμη"
+        enrollment_current = enrollment_verified and enrollment.get("client_version") == VERSION and enrollment.get("architecture") == ARCH
+        if enrollment_current:
+            enrollment_label = "VERIFIED — τρέχον 3.3.0 enrollment consume"
+        elif enrollment_verified:
+            enrollment_label = f"Προηγούμενο VERIFIED ({enrollment.get('client_version') or 'άγνωστη έκδοση'}) — θα ανανεωθεί αυτόματα"
+        else:
+            enrollment_label = "Δεν έχει εκτελεστεί ακόμη"
         enrollment_time = fmt_epoch(enrollment.get("verified_at")) if enrollment_verified else "—"
         enrollment_hint = enrollment.get("source_fingerprint_hint") if enrollment_verified else "—"
         disabled = "" if overall else " disabled"
@@ -681,19 +911,51 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </form>
 </section>"""
 
+        settings_verified = (
+            settings_state.get("verified") is True
+            and settings_state.get("installation_id") == identity["installation_id"]
+            and settings_state.get("node_id") == identity["node_id"]
+            and settings_state.get("client_version") == VERSION
+            and settings_state.get("architecture") == ARCH
+        )
+        settings_label = "VERIFIED — .msh επαληθεύτηκε και δεν αποθηκεύτηκε" if settings_verified else "Δεν έχει εκτελεστεί ακόμη"
+        settings_time = fmt_epoch(settings_state.get("verified_at")) if settings_verified else "—"
+        settings_hint = settings_state.get("source_fingerprint_hint") if settings_verified else "—"
+        settings_sha = settings_state.get("sha256_hint") if settings_verified else "—"
+        settings_bytes = str(settings_state.get("bytes")) if settings_verified else "—"
+        settings_agent = settings_state.get("agent_label") if settings_verified else "—"
+        settings_html = f"""
+<section class="pairbox">
+<h2>Secure settings verification</h2>
+<p>Εκτελεί νέο enrollment authorization για την 3.3.0 και μετά ζητά/καταναλώνει ακριβώς ένα one-time secure settings ticket. Το raw ticket και το <strong>.msh δεν αποθηκεύονται</strong>. Ελέγχονται integrity, required fields, ασφαλές WSS endpoint και opaque node label.</p>
+<div class="mini-grid">
+<div><span>Κατάσταση</span><strong>{esc(settings_label)}</strong></div>
+<div><span>Τελευταίος έλεγχος</span><strong>{esc(settings_time)}</strong></div>
+<div><span>Source fingerprint hint</span><strong>{esc(settings_hint)}</strong></div>
+<div><span>Settings SHA-256 hint</span><strong>{esc(settings_sha)}</strong></div>
+<div><span>Bytes</span><strong>{esc(settings_bytes)}</strong></div>
+<div><span>Opaque node label</span><strong>{esc(settings_agent)}</strong></div>
+</div>
+<form method="post" action="settings-check">
+<input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
+<button type="submit"{disabled}>Έλεγχος secure settings</button>
+</form>
+</section>"""
+
     return f"""<!doctype html>
 <html lang="el"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Smart Pro Managed Support</title>
 <style>
 :root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;background:#10151d;color:#eef5ff;font:14px/1.5 Arial,Helvetica,sans-serif}}main{{max-width:1000px;margin:0 auto;padding:24px}}.hero{{background:#172231;border:1px solid #2c4158;border-radius:16px;padding:22px;margin-bottom:16px}}h1{{margin:0 0 5px;font-size:27px}}h2{{margin:0 0 10px;font-size:18px}}.sub{{color:#aab9ca}}.badge{{display:inline-block;margin-top:14px;padding:8px 12px;border-radius:999px;font-weight:700}}.ok{{background:#173a2a;color:#9ff0bd;border:1px solid #2c7750}}.bad{{background:#442128;color:#ffb5c0;border:1px solid #8c3d4d}}.warn{{background:#43381a;color:#ffe49a;border:1px solid #8b7331}}.note{{margin-top:15px;padding:13px 15px;border-radius:10px;background:#12293a;border:1px solid #245473;color:#cfeeff}}.notice{{margin:0 0 16px;padding:12px 14px;border-radius:10px}}.notice-ok{{background:#173a2a;border:1px solid #2c7750;color:#bdf7d0}}.notice-bad{{background:#442128;border:1px solid #8c3d4d;color:#ffd0d6}}.notice-info{{background:#12293a;border:1px solid #245473;color:#cfeeff}}.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.card,.pairbox{{background:#171d26;border:1px solid #293646;border-radius:12px;padding:15px}}.k{{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:#8fa1b5}}.v{{font-size:15px;font-weight:700;margin-top:4px;overflow-wrap:anywhere}}.pairbox{{margin:16px 0}}.pairbox p{{color:#b7c5d5}}label{{display:block;font-weight:700;margin:12px 0 6px}}input{{width:100%;max-width:460px;padding:11px 12px;border-radius:8px;border:1px solid #3b4c60;background:#0f151d;color:#fff;font:inherit}}button{{display:block;margin-top:12px;border:0;border-radius:8px;padding:10px 14px;background:#19aee8;color:#06131b;font-weight:800;cursor:pointer}}button:disabled,input:disabled{{opacity:.5;cursor:not-allowed}}code{{color:#9fdfff}}.mini-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.mini-grid div{{background:#111821;border:1px solid #28384a;border-radius:9px;padding:10px}}.mini-grid span{{display:block;color:#8fa1b5;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}}.mini-grid strong{{overflow-wrap:anywhere}}.footer{{margin-top:18px;color:#7f91a6;font-size:12px}}@media(max-width:650px){{main{{padding:14px}}.grid,.mini-grid{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.2.0 · Enrollment Authorization Consumer · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
+<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.3.0 · Secure Settings Verification Consumer · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
 {notice_html}
 {pair_html}
 {enrollment_html}
+{settings_html}
 <section class="grid">
-<div class="card"><div class="k">Installation ID</div><div class="v">{esc(policy.get('installation_id') or (identity or {{}}).get('installation_id'))}</div></div>
-<div class="card"><div class="k">Smart Pro Tools</div><div class="v">v{esc((policy.get('source') or {{}}).get('addon_version'))} · Online: {esc(tools_online)}</div></div>
+<div class="card"><div class="k">Installation ID</div><div class="v">{esc(policy.get('installation_id') or (identity or {}).get('installation_id'))}</div></div>
+<div class="card"><div class="k">Smart Pro Tools</div><div class="v">v{esc((policy.get('source') or {}).get('addon_version'))} · Online: {esc(tools_online)}</div></div>
 <div class="card"><div class="k">Portal pairing (local policy)</div><div class="v">{esc(portal_paired_local)}</div></div>
 <div class="card"><div class="k">Συνδρομή</div><div class="v">{esc(subscription.get('plan'))} · {esc(subscription.get('status'))}</div></div>
 <div class="card"><div class="k">Managed entitlement</div><div class="v">{esc(entitled)}</div></div>
@@ -705,12 +967,12 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <div class="card"><div class="k">Authorization chain</div><div class="v">{esc(overall_text)}</div></div>
 <div class="card"><div class="k">Remote access</div><div class="v">Όχι — MeshCentral runtime δεν έχει ενεργοποιηθεί</div></div>
 </section>
-<div class="footer">3.2.0 enrollment-authorization consumer. Το one-time bootstrap ticket καταναλώνεται άμεσα και δεν αποθηκεύεται. Δεν παραλαμβάνει .msh, δεν κατεβάζει ή εκτελεί MeshAgent και δεν δημιουργεί MeshCentral node.</div>
+<div class="footer">3.3.0 secure-settings verification consumer. Το one-time settings ticket και το raw .msh δεν αποθηκεύονται. Δεν κατεβάζει ή εκτελεί MeshAgent, δεν δημιουργεί MeshCentral node και δεν παρέχει remote access.</div>
 </main></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SmartProManaged/3.2.0"
+    server_version = "SmartProManaged/3.3.0"
 
     def _send(self, code, body, content_type):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
@@ -749,6 +1011,9 @@ class Handler(BaseHTTPRequestHandler):
                 "meshcentral": False,
                 "enrollment_authorization_verified_once": bool(load_enrollment_state().get("verified")),
                 "enrollment_source_fingerprint_hint": load_enrollment_state().get("source_fingerprint_hint") or "",
+                "secure_settings_verified_once": bool(load_settings_state().get("verified")),
+                "secure_settings_source_fingerprint_hint": load_settings_state().get("source_fingerprint_hint") or "",
+                "secure_settings_sha256_hint": load_settings_state().get("sha256_hint") or "",
                 "installation_id": policy.get("installation_id") or server.get("installation_id"),
             }
             self._send(200, json.dumps(payload, ensure_ascii=False), "application/json; charset=utf-8")
@@ -759,7 +1024,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path.rstrip("/")
         is_pair = path.endswith("/pair") or path == "pair"
         is_enrollment = path.endswith("/enrollment-check") or path == "enrollment-check"
-        if not is_pair and not is_enrollment:
+        is_settings = path.endswith("/settings-check") or path == "settings-check"
+        if not is_pair and not is_enrollment and not is_settings:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
         length = _as_int(self.headers.get("Content-Length")) or 0
@@ -789,13 +1055,35 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, render_page(read_policy(), message or "Η ενεργοποίηση απέτυχε.", "bad"), "text/html; charset=utf-8")
             return
 
+        if is_enrollment:
+            try:
+                verify_enrollment_authorization()
+                self._send(
+                    200,
+                    render_page(
+                        read_policy(),
+                        "Το one-time enrollment authorization εκδόθηκε, καταναλώθηκε και επαληθεύτηκε. Δεν αποθηκεύτηκε ticket και δεν ενεργοποιήθηκε remote access.",
+                        "ok",
+                    ),
+                    "text/html; charset=utf-8",
+                )
+            except RuntimeError as exc:
+                text = str(exc)
+                _, _, message = text.partition("|")
+                self._send(
+                    400,
+                    render_page(read_policy(), message or "Ο έλεγχος enrollment authorization απέτυχε.", "bad"),
+                    "text/html; charset=utf-8",
+                )
+            return
+
         try:
-            verify_enrollment_authorization()
+            verify_secure_settings()
             self._send(
                 200,
                 render_page(
                     read_policy(),
-                    "Το one-time enrollment authorization εκδόθηκε, καταναλώθηκε και επαληθεύτηκε. Δεν αποθηκεύτηκε ticket και δεν ενεργοποιήθηκε remote access.",
+                    "Το secure .msh παραλήφθηκε, επαληθεύτηκε τοπικά και δεν αποθηκεύτηκε. MeshAgent και remote access παραμένουν ανενεργά.",
                     "ok",
                 ),
                 "text/html; charset=utf-8",
@@ -805,7 +1093,7 @@ class Handler(BaseHTTPRequestHandler):
             _, _, message = text.partition("|")
             self._send(
                 400,
-                render_page(read_policy(), message or "Ο έλεγχος enrollment authorization απέτυχε.", "bad"),
+                render_page(read_policy(), message or "Ο έλεγχος secure settings απέτυχε.", "bad"),
                 "text/html; charset=utf-8",
             )
 
@@ -815,7 +1103,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"[managed] Smart Pro Managed Support {VERSION} enrollment authorization consumer listening on {PORT}", flush=True)
+    print(f"[managed] Smart Pro Managed Support {VERSION} secure settings verification consumer listening on {PORT}", flush=True)
     thread = threading.Thread(target=heartbeat_worker, name="managed-heartbeat", daemon=True)
     thread.start()
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

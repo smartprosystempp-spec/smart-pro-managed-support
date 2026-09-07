@@ -1,6 +1,6 @@
 name: "Smart Pro Managed Support"
-description: "Enrollment Authorization Consumer. Επαληθεύει one-time Broker enrollment authorization πάνω στο dual authorization chain, χωρίς .msh, MeshAgent ή remote access στην 3.2.0."
-version: "3.2.0"
+description: "Secure Settings Verification Consumer. Παραλαμβάνει one-time επαληθευμένα Managed .msh settings μόνο για τοπικό integrity/format verification, χωρίς MeshAgent ή remote access στην 3.3.0."
+version: "3.3.0"
 slug: "smart_pro_managed_support"
 arch:
   - aarch64

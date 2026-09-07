@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.3.0 — Secure Settings Verification Consumer
+- Fresh 3.3.0 enrollment authorization before settings delivery.
+- Dedicated Managed 3.x `/managed/settings/request` + `/consume` consumer.
+- Exact SHA-256 / byte-count / required-field / WSS / opaque node-label verification.
+- Raw one-time ticket and raw `.msh` are never persisted or logged.
+- MeshAgent, MeshCentral runtime and remote access remain disabled.
+- Fixes latent unpaired Ingress rendering fallback for missing identity/source dictionaries.
+
+
 ## 3.2.0 — Enrollment Authorization Consumer
 - Preserves the complete 3.1.0 local policy + Broker identity + server-authorization chain.
 - Adds a controlled manual enrollment authorization check against Broker 0.27.0+.
