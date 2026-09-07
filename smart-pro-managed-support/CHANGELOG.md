@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.6.2 — Strict Canary Runtime Boundary Hotfix
+
+- Διορθώνει live QA εύρημα όπου το τελικό elapsed εμφανίστηκε 48s / 45s.
+- Η 3.6.1 έδινε SIGTERM στο όριο και μετά περίμενε έως 3s graceful shutdown πριν μετρήσει το τελικό elapsed.
+- Το canary ξεκινά πλέον graceful shutdown 3s πριν από το απόλυτο hard stop και κάνει SIGKILL fallback στο hard stop.
+- Το πραγματικό process lifetime δεν επιτρέπεται πλέον να ξεπεράσει το μικρότερο από local max και Broker hard deadline.
+- Η τελική ένδειξη Έναρξη διατηρεί πλέον τον πραγματικό process-start χρόνο αντί για την αρχή του preflight worker.
+- Δεν αλλάζουν pairing, Broker contract, verified chain, technician authorization ή persistence policy.
+
 ## 3.6.1 — Connectivity Canary UI Hotfix
 
 - Διορθώνει μόνο την εμφάνιση της ενότητας `MeshAgent connectivity canary` στο Ingress UI.

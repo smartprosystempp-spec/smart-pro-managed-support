@@ -21,7 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.6.1")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.6.2")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -46,6 +46,7 @@ HEARTBEAT_INTERVAL = 60
 HTTP_TIMEOUT = 12
 RUNTIME_RENEW_DELAY = 70
 CANARY_LOCAL_MAX_RUNTIME = 45
+CANARY_SHUTDOWN_GRACE = 3
 CANARY_POLL_FALLBACK = 5
 NODE_ID_RE = re.compile(r"^SPMN-[A-F0-9]{32}$")
 NODE_SECRET_RE = re.compile(r"^SPMS-[A-Za-z0-9_-]{43}$")
@@ -1573,6 +1574,31 @@ def _terminate_process_group(proc):
         except subprocess.TimeoutExpired: pass
 
 
+def _terminate_process_group_before(proc, hard_stop_monotonic):
+    """Stop the canary process group before the absolute process-lifetime boundary."""
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        try: proc.terminate()
+        except OSError: pass
+    remaining=max(0.0, hard_stop_monotonic-time.monotonic())
+    if remaining>0:
+        try:
+            proc.wait(timeout=remaining)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+    if proc.poll() is None:
+        try: os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            try: proc.kill()
+            except OSError: pass
+        try: proc.wait(timeout=0.5)
+        except subprocess.TimeoutExpired: pass
+
+
 def _report_canary(identity, report_token, result_code, elapsed):
     try:
         data = broker_post('/managed/execution-canary/report', {
@@ -1633,16 +1659,20 @@ def connectivity_canary_worker():
         with os.fdopen(fd,'wb') as h: h.write(hardened); h.flush(); os.fsync(h.fileno())
         private=runtime_dir/'private'; private.mkdir(mode=0o700)
         env=os.environ.copy(); env.update({'HOME':str(private),'TMPDIR':str(private),'XDG_CONFIG_HOME':str(private),'XDG_CACHE_HOME':str(private)})
-        save_canary_state({'status':'running','verified':False,'started_at':now_ts(),'max_runtime_seconds':max_runtime,'agent_label':agent_label,
+        process_started_at=now_ts()
+        save_canary_state({'status':'running','verified':False,'started_at':process_started_at,'max_runtime_seconds':max_runtime,'agent_label':agent_label,
             'installation_id':identity['installation_id'],'node_id':identity['node_id'],'client_version':VERSION,'architecture':ARCH})
         proc=subprocess.Popen(['setsid','./meshagent'],cwd=str(runtime_dir),stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
                               env=env,close_fds=True)
         run_started=time.monotonic(); result='runtime_limit'
+        broker_remaining=max(0,hard_deadline-now_ts())
+        hard_stop_monotonic=run_started+min(max_runtime,broker_remaining)
+        graceful_stop_monotonic=max(run_started,hard_stop_monotonic-CANARY_SHUTDOWN_GRACE)
         while True:
             elapsed=int(time.monotonic()-run_started)
             if proc.poll() is not None:
                 result='agent_exit'; break
-            if elapsed >= max_runtime or now_ts() >= hard_deadline:
+            if time.monotonic() >= graceful_stop_monotonic or now_ts() >= max(0,hard_deadline-CANARY_SHUTDOWN_GRACE):
                 result='runtime_limit'; break
             if not read_policy().get('allowed_local'):
                 result='runtime_lease_lost'; break
@@ -1651,11 +1681,14 @@ def connectivity_canary_worker():
                 reason=_safe_str(watch.get('reason'),80)
                 result='runtime_limit' if reason=='canary_runtime_limit' else 'runtime_lease_lost'
                 break
-            time.sleep(max(1,min(10,watch_interval)))
-        _terminate_process_group(proc)
+            remaining=max(0.0,graceful_stop_monotonic-time.monotonic())
+            if remaining<=0:
+                result='runtime_limit'; break
+            time.sleep(min(max(1,min(10,watch_interval)),remaining))
+        _terminate_process_group_before(proc,hard_stop_monotonic)
         elapsed=int(time.monotonic()-run_started)
         report_ok=_report_canary(identity,report_token,result,elapsed)
-        save_canary_state({'status':'reported' if report_ok else 'failed','verified':report_ok,'started_at':started,'ended_at':now_ts(),
+        save_canary_state({'status':'reported' if report_ok else 'failed','verified':report_ok,'started_at':process_started_at,'ended_at':now_ts(),
             'result_code':result,'elapsed_seconds':elapsed,'max_runtime_seconds':max_runtime,'agent_label':agent_label,
             'installation_id':identity['installation_id'],'node_id':identity['node_id'],'client_version':VERSION,'architecture':ARCH,
             'runtime_directory_deleted':False})
