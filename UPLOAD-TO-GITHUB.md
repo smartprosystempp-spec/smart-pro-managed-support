@@ -1,9 +1,5 @@
-# Πρώτη εγκατάσταση repository
+# Update 3.0.0 → 3.5.0
 
-1. Δημιουργήστε νέο GitHub repository: `smart-pro-managed-support`.
-2. Ανεβάστε **τα περιεχόμενα** αυτού του ZIP στη ρίζα του repository.
-3. Home Assistant → Ρυθμίσεις → Πρόσθετα → Κατάστημα πρόσθετων → Αποθετήρια.
-4. Προσθέστε το URL του νέου repository.
-5. Ανανεώστε το κατάστημα και εγκαταστήστε `Smart Pro Managed Support` 3.0.0.
-6. Μην αφαιρέσετε ακόμη το legacy Managed 2.5.2.
-7. Μην αλλάξετε το Guest/Temporary repository.
+Upload/replace the repository files from this package in the existing `smart-pro-managed-support` GitHub repository. Keep the same repository and slug; do not create another Home Assistant repository.
+
+After commit/push, refresh the Home Assistant add-on store and update **Smart Pro Managed Support** to 3.5.0. Do not remove the add-on first, so its private `/data` remains preserved for future updates.

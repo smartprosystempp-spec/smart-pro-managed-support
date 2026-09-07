@@ -1,18 +1,21 @@
-# Smart Pro Managed Support — Architecture 3.x
+# Architecture — Managed 3.x
 
-## Σταθερή αλυσίδα
+Portal / Subscription Core → Smart Pro Tools → read-only Managed Policy v1 → Smart Pro Managed Support
 
-Portal / Subscription Core → Smart Pro Tools → Smart Pro Managed Support → Managed Backend/Broker → MeshCentral
+Smart Pro Managed Support ↔ Smart Pro Remote Session Broker 0.26.0+ → live Portal Subscription Core
 
-## Αρχές
+Authorization is deliberately two independent gates:
 
-1. Το Smart Pro Tools είναι η τοπική canonical γέφυρα Installation ID + subscription policy.
-2. Το Managed add-on δεν εμπιστεύεται μόνο το τοπικό policy για remote access.
-3. Για μελλοντικό runtime απαιτούνται ταυτόχρονα local policy allowance + fresh Tools lease + server-side Managed authorization.
-4. Το MeshAgent θα τρέχει foreground μέσα στο add-on container. Δεν προβλέπεται `-install`, systemd ή host service persistence.
-5. Guest/Temporary και Managed είναι ξεχωριστά προϊόντα, repositories, slugs και MeshCentral groups.
-6. MeshCentral Managed group: `Smart Pro Managed Support`; Managed node prefix: `SPMNG-`.
+1. **Local gate**: Smart Pro Tools policy must be fresh and ALLOWED.
+2. **Server gate**: authenticated Managed identity must receive an unexpired Server Authorization Contract v1 lease.
 
-## Foundation 3.0.0
+Only `local_allowed && server_authorized` produces `authorized_managed=true`.
 
-Μόνο read-only policy consumer. Καμία δυνατότητα απομακρυσμένης πρόσβασης.
+MeshCentral enrollment/runtime is a later stage and remains absent from 3.2.0.
+
+
+## 3.5.0 secure-settings boundary
+
+`Local Policy ALLOWED + Server Authorization ALLOWED + fresh 3.5.0 enrollment consume` → one-time secure settings ticket → in-memory `.msh` verification → discard raw payload.
+
+This stage does not execute or persist MeshAgent and does not create a MeshCentral runtime connection.
