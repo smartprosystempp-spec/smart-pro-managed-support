@@ -21,7 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.13.0")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.13.1")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -2237,7 +2237,9 @@ def unattended_supervisor():
         control = load_unattended_control()
         if not control.get('enabled'):
             time.sleep(5); continue
-        if MIGRATION_CANARY_WORKER_ACTIVE:
+        # Migration/reseed workers own the MeshAgent lifecycle while active.
+        # The unattended supervisor must not race them by trying to restart the shared runtime.
+        if MIGRATION_CANARY_WORKER_ACTIVE or IDENTITY_RESEED_WORKER_ACTIVE:
             time.sleep(2); continue
         if PERSISTENT_WORKER_ACTIVE:
             time.sleep(5); continue
@@ -4077,7 +4079,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         migration_canary_html = f"""
 <section class="pairbox">
 <h2>Controlled per-installation group migration canary</h2>
-<p>Ιστορικό checkpoint 3.12.0. Απέδειξε ασφαλές stop/target execution/rollback, αλλά η υπάρχουσα stable identity δεν μεταφέρθηκε στο νέο group. Το test διατηρείται μόνο για ιστορικό και <strong>δεν επαναλαμβάνεται</strong>. Η 3.13.0 χρησιμοποιεί ξεχωριστό clean candidate identity reseed.</p>
+<p>Ιστορικό checkpoint 3.12.0. Απέδειξε ασφαλές stop/target execution/rollback, αλλά η υπάρχουσα stable identity δεν μεταφέρθηκε στο νέο group. Το test διατηρείται μόνο για ιστορικό και <strong>δεν επαναλαμβάνεται</strong>. Η 3.13.1 χρησιμοποιεί ξεχωριστό clean candidate identity reseed.</p>
 <div class="mini-grid">
 <div><span>Κατάσταση</span><strong>{esc(gclabel)}</strong></div>
 <div><span>Target group</span><strong>{esc(gcgroup)}</strong></div>
@@ -4101,11 +4103,14 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </section>"""
 
 
+        candidate_exists = _candidate_quarantine_exists()
+        # A quarantined candidate is durable /data state and must remain visible after
+        # a hotfix version bump. Do not make it look like the reseed was never run.
         rcurrent = (
             identity_reseed_state.get('installation_id') == identity['installation_id']
             and identity_reseed_state.get('node_id') == identity['node_id']
-            and identity_reseed_state.get('client_version') == VERSION
             and identity_reseed_state.get('architecture') == ARCH
+            and (identity_reseed_state.get('client_version') == VERSION or candidate_exists)
         )
         rstatus = identity_reseed_state.get('status') if rcurrent else 'not_run'
         if rstatus == 'running':
@@ -4130,12 +4135,12 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         rrollbackstart = 'ΝΑΙ' if rcurrent and identity_reseed_state.get('rollback_shared_runtime_started') else 'ΟΧΙ'
         rcleanup = 'ΝΑΙ' if rcurrent and identity_reseed_state.get('runtime_directory_deleted') else 'ΟΧΙ'
         rexisting = 'ΝΑΙ' if (not rcurrent or identity_reseed_state.get('existing_identity_preserved') is not False) else 'ΟΧΙ'
-        candidate_exists = _candidate_quarantine_exists()
         rdisabled = ' disabled' if (not overall or IDENTITY_RESEED_WORKER_ACTIVE or not PERSISTENT_WORKER_ACTIVE or candidate_exists) else ''
         identity_reseed_html = f"""
 <section class="pairbox">
 <h2>Clean per-installation identity reseed canary</h2>
 <p>Νέο production-oriented μοντέλο. Σταματά προσωρινά το shared unattended runtime, διατηρεί <strong>ανέγγιχτη</strong> την υπάρχουσα stable identity ως rollback και εκτελεί το verified target .msh <strong>χωρίς το παλιό meshagent.db</strong>. Έτσι ο MeshAgent πρέπει να δημιουργήσει <strong>μία νέα candidate identity απευθείας στο {esc(rgroup)}</strong>. Η candidate αποθηκεύεται ξεχωριστά σε quarantine και δεν γίνεται ενεργή. Μετά το ≤45″ canary επανέρχεται το παλιό shared runtime. <strong>Δεν διαγράφεται κανένα παλιό node, δεν γίνεται permanent source/binding commit και δεν ενεργοποιείται technician access.</strong></p>
+{('<p class="note"><strong>Candidate quarantine: PRESENT — reseed locked.</strong> Η υπάρχουσα candidate διατηρείται για το επόμενο server-side binding verification και δεν επιτρέπεται δεύτερο reseed.</p>' if candidate_exists else '')}
 <div class="mini-grid">
 <div><span>Κατάσταση</span><strong>{esc(rlabel)}</strong></div>
 <div><span>Target group</span><strong>{esc(rgroup)}</strong></div>
@@ -4166,7 +4171,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <style>
 :root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;background:#10151d;color:#eef5ff;font:14px/1.5 Arial,Helvetica,sans-serif}}main{{max-width:1000px;margin:0 auto;padding:24px}}.hero{{background:#172231;border:1px solid #2c4158;border-radius:16px;padding:22px;margin-bottom:16px}}h1{{margin:0 0 5px;font-size:27px}}h2{{margin:0 0 10px;font-size:18px}}.sub{{color:#aab9ca}}.badge{{display:inline-block;margin-top:14px;padding:8px 12px;border-radius:999px;font-weight:700}}.ok{{background:#173a2a;color:#9ff0bd;border:1px solid #2c7750}}.bad{{background:#442128;color:#ffb5c0;border:1px solid #8c3d4d}}.warn{{background:#43381a;color:#ffe49a;border:1px solid #8b7331}}.note{{margin-top:15px;padding:13px 15px;border-radius:10px;background:#12293a;border:1px solid #245473;color:#cfeeff}}.notice{{margin:0 0 16px;padding:12px 14px;border-radius:10px}}.notice-ok{{background:#173a2a;border:1px solid #2c7750;color:#bdf7d0}}.notice-bad{{background:#442128;border:1px solid #8c3d4d;color:#ffd0d6}}.notice-info{{background:#12293a;border:1px solid #245473;color:#cfeeff}}.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.card,.pairbox{{background:#171d26;border:1px solid #293646;border-radius:12px;padding:15px}}.k{{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:#8fa1b5}}.v{{font-size:15px;font-weight:700;margin-top:4px;overflow-wrap:anywhere}}.pairbox{{margin:16px 0}}.pairbox p{{color:#b7c5d5}}label{{display:block;font-weight:700;margin:12px 0 6px}}input{{width:100%;max-width:460px;padding:11px 12px;border-radius:8px;border:1px solid #3b4c60;background:#0f151d;color:#fff;font:inherit}}button{{display:block;margin-top:12px;border:0;border-radius:8px;padding:10px 14px;background:#19aee8;color:#06131b;font-weight:800;cursor:pointer}}button:disabled,input:disabled{{opacity:.5;cursor:not-allowed}}code{{color:#9fdfff}}.mini-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.mini-grid div{{background:#111821;border:1px solid #28384a;border-radius:9px;padding:10px}}.mini-grid span{{display:block;color:#8fa1b5;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}}.mini-grid strong{{overflow-wrap:anywhere}}.footer{{margin-top:18px;color:#7f91a6;font-size:12px}}@media(max-width:650px){{main{{padding:14px}}.grid,.mini-grid{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.13.0 · Clean Per-Installation Identity Reseed Canary · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
+<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.13.1 · Reseed Supervisor Lock & Candidate Quarantine Hotfix · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
 {notice_html}
 {pair_html}
 {enrollment_html}
@@ -4194,12 +4199,12 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <div class="card"><div class="k">MeshCentral stable identity</div><div class="v">{esc(mesh_identity_label)} · generation {esc(mesh_identity_generation)} · runs {esc(mesh_identity_runs)} · DB {esc(mesh_identity_db_hint)} · {esc(mesh_identity_updated)}</div></div>
 <div class="card"><div class="k">Remote access</div><div class="v">Όχι — το node μπορεί να είναι online, αλλά web/Terminal/Files technician actions παραμένουν NOT AUTHORIZED</div></div>
 </section>
-<div class="footer">3.13.0 clean per-installation identity reseed canary. Η υπάρχουσα stable identity παραμένει ανέγγιχτη ως rollback. Το target .msh εκτελείται μόνο σε ≤45s foreground canary ΧΩΡΙΣ το παλιό meshagent.db, ώστε να δημιουργηθεί μία quarantined candidate identity στο per-installation group. Δεν γίνεται permanent source/binding commit και δεν ενεργοποιούνται technician actions.</div>
+<div class="footer">3.13.1 reseed supervisor-lock hotfix. Η υπάρχουσα stable identity και η quarantined candidate παραμένουν ανέγγιχτες. Το target .msh εκτελείται μόνο σε ≤45s foreground canary ΧΩΡΙΣ το παλιό meshagent.db, ώστε να δημιουργηθεί μία quarantined candidate identity στο per-installation group. Δεν γίνεται permanent source/binding commit και δεν ενεργοποιούνται technician actions.</div>
 </main></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SmartProManaged/3.13.0"
+    server_version = "SmartProManaged/3.13.1"
 
     def _send(self, code, body, content_type):
         data = body if isinstance(body, bytes) else body.encode("utf-8")

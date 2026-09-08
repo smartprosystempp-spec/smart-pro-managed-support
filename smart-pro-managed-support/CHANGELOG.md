@@ -1,4 +1,12 @@
-# 3.13.0 — Clean Per-Installation Identity Reseed Canary
+# 3.13.1 — Reseed Supervisor Lock & Candidate Quarantine Carry-Forward Hotfix
+
+- Fixes the live QA race where the unattended supervisor could try to restart the shared runtime while the clean identity reseed worker was still active.
+- The unattended supervisor now waits while either the legacy group-migration canary or the clean identity reseed worker owns the MeshAgent lifecycle.
+- Preserves an existing quarantined candidate across the 3.13.0 -> 3.13.1 version bump in the Ingress status card instead of showing the reseed as not-run.
+- Keeps the second-reseed gate locked while candidate quarantine exists.
+- No candidate promotion, no permanent source switch, no identity-binding commit, no old-node deletion, no MeshCentral permission mutation, no technician authorization.
+
+# 3.13.1 — Clean Per-Installation Identity Reseed Canary
 
 - Preserves the current stable shared-group identity unchanged as rollback.
 - Adds Broker 0.39.0 clean-reseed request/consume/watch/report consumer.
