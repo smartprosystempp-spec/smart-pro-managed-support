@@ -1,18 +1,7 @@
-# Smart Pro Managed Support 3.9.0
+# 3.10.0 migration preflight notes
 
-## Unattended Restart Recovery Consumer — restart recovery checkpoint
+Η online παρουσία του Managed MeshCentral node και η τεχνική πρόσβαση παραμένουν ξεχωριστές έννοιες. Η 3.10.0 διατηρεί το αποδεδειγμένο unattended runtime της 3.9.0 και προσθέτει μόνο authenticated preflight προς τον Broker 0.36.0+.
 
-Η 3.9.0 είναι το πρώτο client στάδιο μετά το live PASS της σταθερής MeshCentral identity στην 3.7.0 και απαιτεί Broker 0.32.0+.
+Το preflight επαληθεύει ότι η υπάρχουσα stable MeshAgent identity και το Installation ID συμφωνούν με το verified target group `Smart Pro Managed — <Installation ID>`, το dedicated controller binding και την ενεργή Portal-backed authorization. Δεν παραδίδει target `.msh`, δεν μετακινεί MeshCentral node, δεν αλλάζει το runtime source και δεν ενεργοποιεί Web/Terminal/Files/Desktop.
 
-- Χρησιμοποιεί μόνο υπάρχουσα VERIFIED σταθερή `meshagent.db` identity. Δεν κάνει seed νέας identity.
-- Κάνει fresh enrollment/settings/agent verification πριν από start.
-- Ζητά renewable runtime lease και το νέο `smart-pro-managed-persistent-runtime-v1` authorization.
-- Εκτελεί μόνο foreground `setsid ./meshagent`, χωρίς `-install` ή service persistence.
-- Polls continuous server watch και στέλνει health reports.
-- Ανανεώνει το runtime lease όταν ζητηθεί από τον Broker.
-- Σε agent exit κάνει bounded controlled reconnect με την ίδια identity.
-- Σε local policy/server authorization/runtime lease loss σταματά fail-closed.
-- Technician actions παραμένουν NOT AUTHORIZED.
-- Raw runtime lease, start ticket και control token μένουν μόνο στη μνήμη.
-
-Για το πρώτο live checkpoint, η continuous λειτουργία ξεκινά χειροκίνητα από Ingress. Το update μόνο του δεν ενεργοποιεί MeshAgent.
+Η σταθερή MeshAgent identity παραμένει ιδιωτικά στο `/data/meshagent-identity/`. Runtime binary, `.msh`, runtime lease και Broker control material παραμένουν ephemeral/memory-only. Το migration-preflight state αποθηκεύει μόνο non-secret hints και timestamps.

@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.10.0 — Per-Installation Group Migration Preflight Consumer
+- Built on the live-stable 3.9.0 unattended runtime and Broker 0.36.0 preflight foundation.
+- Adds authenticated `smart-pro-managed-group-migration-preflight-v1` consumer.
+- Verifies Installation ID, target group name, stable opaque agent label, target/shared source distinction, controller binding hint and live server authorization.
+- Persists only non-secret preflight metadata under `/data`; no enrollment identifier, exact MeshID, raw `.msh`, node secret or runtime tokens are persisted/rendered/logged.
+- May run while the stable unattended runtime remains online because the operation is metadata-only.
+- No target `.msh` delivery, node move, runtime-source switch, identity-binding commit, MeshAgent execution change or technician permission mutation.
+- Existing unattended/continuous runtime functions remain source-identical to 3.9.0.
+
 ## 3.9.0 — Unattended Restart Recovery Consumer
 - Adds explicit admin enable/pause state for unattended Managed runtime.
 - Update alone remains safe: unattended mode defaults OFF when no prior 3.9 control file exists.
