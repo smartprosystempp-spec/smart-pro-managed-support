@@ -21,7 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.11.1")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.12.0")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -40,6 +40,7 @@ PERSISTENT_STATE_FILE = DATA_DIR / "continuous-runtime-state.json"
 UNATTENDED_CONTROL_FILE = DATA_DIR / "unattended-runtime-control.json"
 GROUP_MIGRATION_PREFLIGHT_FILE = DATA_DIR / "group-migration-preflight.json"
 GROUP_MIGRATION_TARGET_SETTINGS_FILE = DATA_DIR / "group-migration-target-settings.json"
+GROUP_MIGRATION_CANARY_FILE = DATA_DIR / "group-migration-canary.json"
 MESH_IDENTITY_DIR = DATA_DIR / "meshagent-identity"
 MESH_IDENTITY_DB_FILE = MESH_IDENTITY_DIR / "meshagent.db"
 MESH_IDENTITY_META_FILE = MESH_IDENTITY_DIR / "identity-meta.json"
@@ -62,6 +63,8 @@ NODE_SECRET_RE = re.compile(r"^SPMS-[A-Za-z0-9_-]{43}$")
 BOOTSTRAP_TICKET_RE = re.compile(r"^SPMB-[A-Za-z0-9_-]{43}$")
 SETTINGS_TICKET_RE = re.compile(r"^SPMD-[A-Za-z0-9_-]{43}$")
 TARGET_SETTINGS_TICKET_RE = re.compile(r"^SPGMT-[A-Za-z0-9_-]{43}$")
+MIGRATION_CANARY_TICKET_RE = re.compile(r"^SPMGC-[A-Za-z0-9_-]{43}$")
+MIGRATION_CANARY_REPORT_RE = re.compile(r"^SPMGR-[A-Za-z0-9_-]{43}$")
 AGENT_TICKET_RE = re.compile(r"^SPMA-[A-Za-z0-9_-]{43}$")
 RUNTIME_LEASE_RE = re.compile(r"^SPMRL-[A-Za-z0-9_-]{43}$")
 CANARY_TICKET_RE = re.compile(r"^SPMEC-[A-Za-z0-9_-]{43}$")
@@ -83,9 +86,13 @@ CANARY_WORKER_ACTIVE = False
 PERSISTENT_WORKER_LOCK = threading.Lock()
 PERSISTENT_WORKER_ACTIVE = False
 PERSISTENT_STOP_EVENT = threading.Event()
+MIGRATION_CANARY_WORKER_LOCK = threading.Lock()
+MIGRATION_CANARY_WORKER_ACTIVE = False
 PERSISTENT_RECONNECT_DELAYS = (5, 10, 20, 30, 60)
 PERSISTENT_MAX_CONSECUTIVE_EXITS = 5
 PERSISTENT_WATCH_FAILURE_GRACE = 45
+MIGRATION_CANARY_LOCAL_MAX_RUNTIME = 45
+MIGRATION_CANARY_SHARED_STOP_TIMEOUT = 20
 UNATTENDED_STARTUP_DELAY = 8
 UNATTENDED_STALE_RECOVERY_DELAY = 80
 UNATTENDED_FAILURE_RETRY_DELAY = 90
@@ -2220,6 +2227,8 @@ def unattended_supervisor():
         control = load_unattended_control()
         if not control.get('enabled'):
             time.sleep(5); continue
+        if MIGRATION_CANARY_WORKER_ACTIVE:
+            time.sleep(2); continue
         if PERSISTENT_WORKER_ACTIVE:
             time.sleep(5); continue
 
@@ -2833,8 +2842,8 @@ def save_group_migration_target_settings_state(state):
             pass
 
 
-def verify_group_migration_target_settings():
-    """One-time Broker 0.37 target .msh delivery + strict in-memory verification. Never executes MeshAgent."""
+def verify_group_migration_target_settings(return_material=False):
+    """One-time Broker 0.37+ target .msh delivery + strict in-memory verification. Raw material is returned only to the controlled 3.12 migration canary when explicitly requested."""
     identity = load_identity()
     if identity is None:
         raise RuntimeError('group_target_not_paired|Απαιτείται ενεργή Managed identity πριν από target .msh verification.')
@@ -2964,8 +2973,17 @@ def verify_group_migration_target_settings():
             'error_code':'', 'error_message':'',
         }
         save_group_migration_target_settings_state(state)
-        raw = b''; encoded = ''
+        material = {
+            'raw': raw, 'fields': fields, 'agent_label': expected_label, 'sha256': actual_sha, 'bytes': len(raw),
+            'target_group_name': expected_group, 'target_mesh_id_hint': mesh_id_hint, 'target_binding_hint': binding_hint,
+            'target_source_fingerprint_hint': target_source_hint, 'shared_source_fingerprint_hint': shared_source_hint,
+            'mesh_server_host': mesh_server_host,
+        }
         print(f"[managed] target group settings VERIFIED for {identity['installation_id']} label={expected_label} group={expected_group}; target_msh_memory_only=true runtime_source_switch=false node_move=false identity_binding_commit=false meshagent_execution=false technician_actions=false", flush=True)
+        if return_material:
+            encoded = ''
+            return state, material
+        raw = b''; encoded = ''
         return state
     except RuntimeError as exc:
         text = str(exc); code, _, message = text.partition('|')
@@ -2978,6 +2996,267 @@ def verify_group_migration_target_settings():
             'identity_binding_commit':False,'meshagent_execution':False,'technician_actions_authorized':False,
         })
         raise
+
+
+def load_group_migration_canary_state():
+    base = {
+        'status':'not_run','verified':False,'started_at':0,'ended_at':0,'result_code':'','elapsed_seconds':0,
+        'installation_id':'','node_id':'','client_version':'','architecture':'','target_group_name':'',
+        'expected_agent_label':'','target_mesh_id_hint':'','target_binding_hint':'','target_source_fingerprint_hint':'',
+        'shared_source_fingerprint_hint':'','shared_runtime_stopped':False,'stable_identity_reused':False,
+        'target_meshagent_execution':False,'permanent_runtime_source_switch':False,'identity_binding_commit':False,
+        'rollback_shared_runtime_requested':False,'rollback_shared_runtime_started':False,'runtime_directory_deleted':False,
+        'technician_actions_authorized':False,'error_code':'','error_message':'',
+    }
+    try:
+        if not GROUP_MIGRATION_CANARY_FILE.exists(): return base
+        st=GROUP_MIGRATION_CANARY_FILE.stat()
+        if st.st_size<=0 or st.st_size>32768: return base
+        data=json.loads(GROUP_MIGRATION_CANARY_FILE.read_text(encoding='utf-8'))
+    except (OSError,UnicodeError,json.JSONDecodeError): return base
+    if not isinstance(data,dict): return base
+    for k in base:
+        if k in data: base[k]=data[k]
+    return base
+
+
+def save_group_migration_canary_state(state):
+    allowed=set(load_group_migration_canary_state().keys())
+    payload={k:state.get(k) for k in allowed if k in state}
+    DATA_DIR.mkdir(parents=True,exist_ok=True)
+    tmp=GROUP_MIGRATION_CANARY_FILE.with_suffix('.tmp')
+    fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+    try:
+        with os.fdopen(fd,'w',encoding='utf-8') as h:
+            json.dump(payload,h,ensure_ascii=False,separators=(',',':')); h.flush(); os.fsync(h.fileno())
+        os.replace(tmp,GROUP_MIGRATION_CANARY_FILE); os.chmod(GROUP_MIGRATION_CANARY_FILE,0o600)
+    finally:
+        try:
+            if tmp.exists(): tmp.unlink()
+        except OSError: pass
+
+
+def _copy_persisted_identity_for_migration(runtime_dir, identity, target_settings):
+    """Copy the exact protected meshagent.db without accepting a new binding.
+
+    This is the single controlled migration exception: ownership + DB integrity +
+    stable label are verified against persisted metadata, while the old shared
+    binding hash is intentionally NOT replaced by the target binding during canary.
+    """
+    state=_validate_persisted_mesh_identity(identity,None)
+    if state.get('state')!='ready':
+        raise RuntimeError('group_canary_identity_not_ready|Η stable MeshAgent identity δεν είναι READY για migration canary.')
+    expected=_safe_str(target_settings.get('agent_label'),40).upper()
+    if not AGENT_LABEL_RE.fullmatch(expected) or not secrets.compare_digest(expected,state.get('agent_label') or ''):
+        raise RuntimeError('group_canary_identity_label_mismatch|Το target .msh δεν συμφωνεί με το persisted stable node label.')
+    rel=Path(state['runtime_relative_path'])
+    target=Path(runtime_dir)/rel
+    target.parent.mkdir(parents=True,exist_ok=True,mode=0o700); os.chmod(target.parent,0o700)
+    fd,size=_open_regular_nofollow(MESH_IDENTITY_DB_FILE,MAX_MESH_IDENTITY_DB_BYTES)
+    tmp=target.with_name(target.name+'.migration-copy.tmp')
+    try:
+        outfd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+        try:
+            total=0; digest=hashlib.sha256()
+            while True:
+                chunk=os.read(fd,65536)
+                if not chunk: break
+                total+=len(chunk)
+                if total>MAX_MESH_IDENTITY_DB_BYTES:
+                    raise RuntimeError('group_canary_identity_db_size|Το stable identity database ξεπέρασε το ασφαλές όριο.')
+                view=memoryview(chunk)
+                while view:
+                    written=os.write(outfd,view)
+                    if written<=0: raise RuntimeError('group_canary_identity_copy_write|Απέτυχε η ασφαλής runtime αντιγραφή της stable identity.')
+                    view=view[written:]
+                digest.update(chunk)
+            os.fsync(outfd)
+        finally: os.close(outfd)
+        if total!=size or not secrets.compare_digest(digest.hexdigest(),state['db_sha256']):
+            raise RuntimeError('group_canary_identity_copy_mismatch|Η runtime αντιγραφή της stable identity απέτυχε στον SHA-256 έλεγχο.')
+        os.replace(tmp,target); os.chmod(target,0o600)
+    finally:
+        os.close(fd)
+        try:
+            if tmp.exists(): tmp.unlink()
+        except OSError: pass
+    return {'generation':state['generation'],'continuity_runs':state.get('continuity_runs',0),'runtime_relative_path':str(rel),'db_sha256':state['db_sha256']}
+
+
+def _migration_canary_report(identity, report_token, result_code, elapsed):
+    try:
+        data=broker_post('/managed/group-migration/canary/report',{
+            'report_token':report_token,'node_id':identity['node_id'],'node_secret':identity['node_secret'],
+            'result_code':result_code,'elapsed_seconds':max(0,min(60,int(elapsed)))})
+        return data.get('success') is True and data.get('reported') is True
+    except RuntimeError:
+        return False
+
+
+def group_migration_canary_worker():
+    global MIGRATION_CANARY_WORKER_ACTIVE
+    identity=load_identity(); runtime_dir=None; agent_temp=None; proc=None; report_token=''; started=now_ts(); cleanup_ok=True
+    result='launch_failed'; process_started_at=0; shared_stopped=False; reused=False; target_execution=False
+    rollback_requested=False; rollback_started=False; target_state={}; target_material=None
+    try:
+        if identity is None: raise RuntimeError('group_canary_not_paired|Απαιτείται ενεργή Managed identity πριν από migration canary.')
+        if not load_unattended_control().get('enabled'):
+            raise RuntimeError('group_canary_unattended_disabled|Το unattended Managed runtime πρέπει να είναι ENABLED πριν από migration canary.')
+        if not read_policy().get('allowed_local'):
+            raise RuntimeError('group_canary_local_policy_denied|Η τοπική Managed πολιτική δεν επιτρέπει migration canary.')
+        server=get_server_state()
+        if server.get('authorized_server') is not True or (_as_int(server.get('valid_until')) or 0)<=now_ts():
+            raise RuntimeError('group_canary_server_authorization_denied|Απαιτείται ενεργό Broker Server Authorization πριν από migration canary.')
+        stable=_validate_persisted_mesh_identity(identity,None)
+        if stable.get('state')!='ready': raise RuntimeError('group_canary_identity_not_ready|Η stable MeshAgent identity δεν είναι READY.')
+        save_group_migration_canary_state({'status':'stopping_shared_runtime','verified':False,'started_at':started,
+            'installation_id':identity['installation_id'],'node_id':identity['node_id'],'client_version':VERSION,'architecture':ARCH,
+            'expected_agent_label':stable.get('agent_label',''),'shared_runtime_stopped':False,'stable_identity_reused':False,
+            'target_meshagent_execution':False,'permanent_runtime_source_switch':False,'identity_binding_commit':False,
+            'rollback_shared_runtime_requested':False,'rollback_shared_runtime_started':False,'runtime_directory_deleted':False,
+            'technician_actions_authorized':False})
+        PERSISTENT_STOP_EVENT.set()
+        deadline=time.monotonic()+MIGRATION_CANARY_SHARED_STOP_TIMEOUT
+        while PERSISTENT_WORKER_ACTIVE and time.monotonic()<deadline: time.sleep(0.25)
+        if PERSISTENT_WORKER_ACTIVE:
+            raise RuntimeError('group_canary_shared_runtime_stop_failed|Το shared unattended runtime δεν τερματίστηκε μέσα στο ασφαλές χρονικό όριο.')
+        shared_stopped=True
+
+        target_state,target_material=verify_group_migration_target_settings(return_material=True)
+        expected_group=f"Smart Pro Managed — {identity['installation_id']}"
+        if target_state.get('verified') is not True or target_material.get('target_group_name')!=expected_group:
+            raise RuntimeError('group_canary_target_not_verified|Το target .msh δεν είναι VERIFIED για το per-installation group.')
+        # The generic agent-binary delivery contract is deliberately still tied to
+        # a fresh ordinary Managed settings verification. Refresh that chain only
+        # to authorize/verify the binary; the runtime below uses TARGET settings.
+        shared_material=_execution_settings_material(identity)
+        if _safe_str(shared_material.get('agent_label'),40).upper()!=target_material['agent_label']:
+            raise RuntimeError('group_canary_shared_target_label_mismatch|Shared και target settings δεν συμφωνούν στο stable node label.')
+        agent=_execution_agent_material(identity,shared_material); agent_temp=agent['path']
+        shared_material['raw']=b''
+
+        common={'node_id':identity['node_id'],'node_secret':identity['node_secret'],'client_version':VERSION,'architecture':ARCH}
+        auth=broker_post('/managed/group-migration/canary/request',common)
+        ticket=_safe_str(auth.get('canary_ticket'),90); report_token=_safe_str(auth.get('report_token'),90)
+        max_runtime=min(MIGRATION_CANARY_LOCAL_MAX_RUNTIME,_as_int(auth.get('max_runtime_seconds')) or 0)
+        if not (auth.get('success') is True and auth.get('phase')=='per_installation_group_migration_canary_request'
+                and auth.get('contract_id')=='smart-pro-managed-group-migration-canary-v1' and _as_int(auth.get('schema_version'))==1
+                and MIGRATION_CANARY_TICKET_RE.fullmatch(ticket) and MIGRATION_CANARY_REPORT_RE.fullmatch(report_token)
+                and auth.get('foreground_only') is True and auth.get('stable_identity_reuse_required') is True
+                and auth.get('shared_runtime_stop_required') is True and auth.get('permanent_runtime_source_switch') is False
+                and auth.get('identity_binding_commit') is False and auth.get('technician_actions_authorized') is False
+                and auth.get('remote_access') is False and 20<=max_runtime<=MIGRATION_CANARY_LOCAL_MAX_RUNTIME
+                and _safe_str(auth.get('target_group_name'),200)==expected_group
+                and _safe_str(auth.get('expected_agent_label'),80).upper()==target_material['agent_label']):
+            raise RuntimeError('group_canary_authorization_invalid|Ο Broker δεν επέστρεψε έγκυρο controlled migration canary contract.')
+        consume=dict(common); consume['canary_ticket']=ticket
+        run=broker_post('/managed/group-migration/canary/consume',consume); ticket=''
+        hard_deadline=_as_int(run.get('hard_deadline')) or 0; watch_interval=_as_int(run.get('watch_interval_seconds')) or 5
+        if not (run.get('success') is True and run.get('phase')=='per_installation_group_migration_canary_consume'
+                and run.get('contract_id')=='smart-pro-managed-group-migration-canary-v1'
+                and run.get('temporary_target_group_connectivity') is True and run.get('foreground_only') is True
+                and run.get('stable_identity_reuse_required') is True and run.get('permanent_runtime_source_switch') is False
+                and run.get('identity_binding_commit') is False and run.get('technician_actions_authorized') is False
+                and run.get('remote_access') is False and hard_deadline>now_ts()):
+            raise RuntimeError('group_canary_consume_invalid|Η controlled migration canary authorization δεν καταναλώθηκε σωστά.')
+        max_runtime=min(max_runtime,_as_int(run.get('max_runtime_seconds')) or max_runtime)
+
+        runtime_dir=Path(tempfile.mkdtemp(prefix='smart-pro-managed-group-migration-canary-',dir='/tmp')); os.chmod(runtime_dir,0o700)
+        agent_path=runtime_dir/'meshagent'; shutil.move(agent_temp,agent_path); agent_temp=None; os.chmod(agent_path,0o700)
+        msh_path=runtime_dir/'meshagent.msh'; hardened=_harden_runtime_msh(target_material['raw'],target_material['agent_label'])
+        fd=os.open(msh_path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+        with os.fdopen(fd,'wb') as h: h.write(hardened); h.flush(); os.fsync(h.fileno())
+        private=runtime_dir/'private'; private.mkdir(mode=0o700)
+        prepared=_copy_persisted_identity_for_migration(runtime_dir,identity,target_material); reused=True
+        env=os.environ.copy(); env.update({'HOME':str(private),'TMPDIR':str(private),'XDG_CONFIG_HOME':str(private),'XDG_CACHE_HOME':str(private)})
+        process_started_at=now_ts()
+        save_group_migration_canary_state({'status':'running','verified':False,'started_at':process_started_at,
+            'installation_id':identity['installation_id'],'node_id':identity['node_id'],'client_version':VERSION,'architecture':ARCH,
+            'target_group_name':expected_group,'expected_agent_label':target_material['agent_label'],
+            'target_mesh_id_hint':target_material['target_mesh_id_hint'],'target_binding_hint':target_material['target_binding_hint'],
+            'target_source_fingerprint_hint':target_material['target_source_fingerprint_hint'],'shared_source_fingerprint_hint':target_material['shared_source_fingerprint_hint'],
+            'shared_runtime_stopped':True,'stable_identity_reused':True,'target_meshagent_execution':True,
+            'permanent_runtime_source_switch':False,'identity_binding_commit':False,'rollback_shared_runtime_requested':False,
+            'rollback_shared_runtime_started':False,'runtime_directory_deleted':False,'technician_actions_authorized':False})
+        proc=subprocess.Popen(['setsid','./meshagent'],cwd=str(runtime_dir),stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+                              env=env,close_fds=True); target_execution=True
+        run_started=time.monotonic(); result='runtime_limit'
+        hard_stop_mono=run_started+min(max_runtime,max(0,hard_deadline-now_ts()))
+        graceful=max(run_started,hard_stop_mono-CANARY_SHUTDOWN_GRACE)
+        print(f"[managed] migration canary target runtime started for {identity['installation_id']} label={target_material['agent_label']} group={expected_group} identity=reuse; permanent_commit=false technician_actions=false",flush=True)
+        while True:
+            if proc.poll() is not None: result='agent_exit'; break
+            if time.monotonic()>=graceful or now_ts()>=max(0,hard_deadline-CANARY_SHUTDOWN_GRACE): result='runtime_limit'; break
+            if not read_policy().get('allowed_local'): result='server_authorization_lost'; break
+            watch=broker_post('/managed/group-migration/canary/watch',{'report_token':report_token,'node_id':identity['node_id'],'node_secret':identity['node_secret']})
+            if watch.get('continue') is not True:
+                result='runtime_limit' if _safe_str(watch.get('reason'),80)=='canary_runtime_limit' else 'server_authorization_lost'; break
+            time.sleep(min(max(1,min(5,watch_interval)),max(0.2,graceful-time.monotonic())))
+        _terminate_process_group_before(proc,hard_stop_mono); proc=None
+        elapsed=max(0,int(time.monotonic()-run_started))
+        report_ok=_migration_canary_report(identity,report_token,result,elapsed); report_token=''
+        canary_verified = bool(report_ok and result == 'runtime_limit')
+        save_group_migration_canary_state({'status':'reported' if canary_verified else 'failed','verified':canary_verified,'started_at':process_started_at,'ended_at':now_ts(),
+            'result_code':result,'elapsed_seconds':elapsed,'installation_id':identity['installation_id'],'node_id':identity['node_id'],
+            'client_version':VERSION,'architecture':ARCH,'target_group_name':expected_group,'expected_agent_label':target_material['agent_label'],
+            'target_mesh_id_hint':target_material['target_mesh_id_hint'],'target_binding_hint':target_material['target_binding_hint'],
+            'target_source_fingerprint_hint':target_material['target_source_fingerprint_hint'],'shared_source_fingerprint_hint':target_material['shared_source_fingerprint_hint'],
+            'shared_runtime_stopped':True,'stable_identity_reused':True,'target_meshagent_execution':True,
+            'permanent_runtime_source_switch':False,'identity_binding_commit':False,'rollback_shared_runtime_requested':False,
+            'rollback_shared_runtime_started':False,'runtime_directory_deleted':False,'technician_actions_authorized':False})
+        print(f"[managed] migration canary target runtime stopped result={result} reported={str(report_ok).lower()} verified={str(canary_verified).lower()} elapsed={elapsed}s; identity_binding_commit=false permanent_runtime_source_switch=false",flush=True)
+    except (RuntimeError,OSError,subprocess.SubprocessError) as exc:
+        if proc is not None: _terminate_process_group(proc); proc=None
+        elapsed=max(0,now_ts()-started); text=str(exc); code,_,message=text.partition('|')
+        if not code: code='group_canary_failed'
+        if report_token: _migration_canary_report(identity,report_token,'launch_failed',elapsed); report_token=''
+        save_group_migration_canary_state({'status':'failed','verified':False,'started_at':started,'ended_at':now_ts(),'result_code':code,'elapsed_seconds':elapsed,
+            'installation_id':(identity or {}).get('installation_id',''),'node_id':(identity or {}).get('node_id',''),'client_version':VERSION,'architecture':ARCH,
+            'target_group_name':(target_material or {}).get('target_group_name',''),'expected_agent_label':(target_material or {}).get('agent_label',''),
+            'shared_runtime_stopped':shared_stopped,'stable_identity_reused':reused,'target_meshagent_execution':target_execution,
+            'permanent_runtime_source_switch':False,'identity_binding_commit':False,'rollback_shared_runtime_requested':False,
+            'rollback_shared_runtime_started':False,'runtime_directory_deleted':False,'technician_actions_authorized':False,
+            'error_code':_safe_str(code,100),'error_message':_safe_str(message or text,300)})
+        print(f"[managed] migration canary failed code={code}; permanent binding/source unchanged",flush=True)
+    finally:
+        if proc is not None: _terminate_process_group(proc)
+        if agent_temp:
+            try: Path(agent_temp).unlink(missing_ok=True)
+            except OSError: cleanup_ok=False
+        if runtime_dir:
+            try: shutil.rmtree(runtime_dir)
+            except OSError: cleanup_ok=False
+        st=load_group_migration_canary_state(); st['runtime_directory_deleted']=cleanup_ok; save_group_migration_canary_state(st)
+        if target_material is not None:
+            try: target_material['raw']=b''
+            except Exception: pass
+        with MIGRATION_CANARY_WORKER_LOCK: MIGRATION_CANARY_WORKER_ACTIVE=False
+        # Roll back to the already-proven shared runtime. This does not change the
+        # persisted binding; it merely restarts the normal unattended path.
+        control=load_unattended_control(); local=read_policy(); server=get_server_state()
+        if control.get('enabled') and local.get('allowed_local') and server.get('authorized_server') is True and (_as_int(server.get('valid_until')) or 0)>now_ts():
+            rollback_requested=True
+            st=load_group_migration_canary_state(); st['rollback_shared_runtime_requested']=True; save_group_migration_canary_state(st)
+            try:
+                if not PERSISTENT_WORKER_ACTIVE: start_persistent_runtime()
+                rollback_started=True
+            except RuntimeError:
+                rollback_started=bool(PERSISTENT_WORKER_ACTIVE)
+            st=load_group_migration_canary_state(); st['rollback_shared_runtime_started']=rollback_started; save_group_migration_canary_state(st)
+            print(f"[managed] migration canary rollback to shared unattended runtime requested={str(rollback_requested).lower()} started={str(rollback_started).lower()}",flush=True)
+
+
+def start_group_migration_canary():
+    global MIGRATION_CANARY_WORKER_ACTIVE
+    with MIGRATION_CANARY_WORKER_LOCK:
+        if MIGRATION_CANARY_WORKER_ACTIVE:
+            raise RuntimeError('group_canary_already_running|Υπάρχει ήδη controlled migration canary σε εξέλιξη.')
+        if CANARY_WORKER_ACTIVE:
+            raise RuntimeError('group_canary_identity_canary_active|Υπάρχει ήδη identity canary σε εξέλιξη.')
+        if not PERSISTENT_WORKER_ACTIVE:
+            raise RuntimeError('group_canary_shared_runtime_not_running|Το shared unattended runtime πρέπει να είναι RUNNING πριν από το migration canary.')
+        MIGRATION_CANARY_WORKER_ACTIVE=True
+    t=threading.Thread(target=group_migration_canary_worker,name='managed-group-migration-canary',daemon=True); t.start()
 
 def heartbeat_worker():
     last_summary = None
@@ -3017,6 +3296,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
     persistent_state = load_persistent_state()
     migration_preflight_state = load_group_migration_preflight_state()
     migration_target_settings_state = load_group_migration_target_settings_state()
+    migration_canary_state = load_group_migration_canary_state()
 
     local_allowed = bool(local_snapshot.get("allowed_local"))
     server_allowed = bool(server.get("authorized_server")) and (_as_int(server.get("valid_until")) or 0) > now_ts()
@@ -3075,6 +3355,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
     persistent_html = ""
     migration_preflight_html = ""
     migration_target_settings_html = ""
+    migration_canary_html = ""
     if identity is not None:
         enrollment_verified = (
             enrollment.get("verified") is True
@@ -3090,7 +3371,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
             enrollment_label = "Δεν έχει εκτελεστεί ακόμη"
         enrollment_time = fmt_epoch(enrollment.get("verified_at")) if enrollment_verified else "—"
         enrollment_hint = enrollment.get("source_fingerprint_hint") if enrollment_verified else "—"
-        disabled = "" if (overall and not PERSISTENT_WORKER_ACTIVE and not CANARY_WORKER_ACTIVE) else " disabled"
+        disabled = "" if (overall and not PERSISTENT_WORKER_ACTIVE and not CANARY_WORKER_ACTIVE and not MIGRATION_CANARY_WORKER_ACTIVE) else " disabled"
         enrollment_html = f"""
 <section class="pairbox">
 <h2>Enrollment authorization check</h2>
@@ -3312,7 +3593,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         persistent_html = f"""
 <section class="pairbox">
 <h2>Unattended Managed runtime — restart recovery checkpoint</h2>
-<p>Χρησιμοποιεί <strong>αποκλειστικά την ήδη σταθερή MeshCentral identity</strong>, ανανεώνει βραχύβια runtime leases, ελέγχει συνεχώς τον Broker και αναφέρει health. Όσο οι άδειες παραμένουν έγκυρες, το ίδιο node μπορεί να μένει online χωρίς χρονικό canary limit. Αν χαθεί local policy, subscription/server authorization ή runtime lease, σταματά fail-closed. Το unattended control που αποδείχθηκε στην 3.9.0 <strong>διατηρείται στην 3.11.1</strong>. Αν ήταν ήδη ENABLED, μετά το add-on restart περιμένει έγκυρη local + server authorization και επαναφέρει αυτόματα την ίδια σταθερή συσκευή. Η παύση απενεργοποιεί αυτή την αυτόματη επαναφορά.</p>
+<p>Χρησιμοποιεί <strong>αποκλειστικά την ήδη σταθερή MeshCentral identity</strong>, ανανεώνει βραχύβια runtime leases, ελέγχει συνεχώς τον Broker και αναφέρει health. Όσο οι άδειες παραμένουν έγκυρες, το ίδιο node μπορεί να μένει online χωρίς χρονικό canary limit. Αν χαθεί local policy, subscription/server authorization ή runtime lease, σταματά fail-closed. Το unattended control που αποδείχθηκε στην 3.9.0 <strong>διατηρείται στην 3.12.0</strong>. Αν ήταν ήδη ENABLED, μετά το add-on restart περιμένει έγκυρη local + server authorization και επαναφέρει αυτόματα την ίδια σταθερή συσκευή. Η παύση απενεργοποιεί αυτή την αυτόματη επαναφορά.</p>
 <div class="mini-grid">
 <div><span>Κατάσταση</span><strong>{esc(plabel)}</strong></div>
 <div><span>Έναρξη</span><strong>{esc(pstart)}</strong></div>
@@ -3412,7 +3693,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         thost = migration_target_settings_state.get('mesh_server_host') if tcurrent else '—'
         tsha = migration_target_settings_state.get('sha256_hint') if tcurrent else '—'
         tbytes = str(migration_target_settings_state.get('bytes') or '—') if tcurrent else '—'
-        tdisabled = ' disabled' if (not overall or CANARY_WORKER_ACTIVE) else ''
+        tdisabled = ' disabled' if (not overall or CANARY_WORKER_ACTIVE or MIGRATION_CANARY_WORKER_ACTIVE) else ''
         migration_target_settings_html = f"""
 <section class="pairbox">
 <h2>Per-installation target .msh verification</h2>
@@ -3440,13 +3721,67 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </form>
 </section>"""
 
+        gccurrent = (
+            migration_canary_state.get('installation_id') == identity['installation_id']
+            and migration_canary_state.get('node_id') == identity['node_id']
+            and migration_canary_state.get('client_version') == VERSION
+            and migration_canary_state.get('architecture') == ARCH
+        )
+        gcstatus = migration_canary_state.get('status') if gccurrent else 'not_run'
+        if gcstatus == 'running':
+            gclabel = 'RUNNING — TARGET GROUP CANARY ≤45″'
+        elif gcstatus == 'reported' and migration_canary_state.get('verified') is True:
+            gclabel = 'VERIFIED — TARGET CANARY REPORTED / ROLLBACK REQUESTED'
+        elif gcstatus == 'failed':
+            gclabel = 'FAILED — ' + (migration_canary_state.get('error_message') or migration_canary_state.get('result_code') or 'ελέγξτε logs')
+        elif gcstatus == 'stopping_shared_runtime':
+            gclabel = 'PREPARING — ασφαλής τερματισμός shared runtime'
+        else:
+            gclabel = 'Δεν έχει εκτελεστεί ακόμη'
+        gcgroup = migration_canary_state.get('target_group_name') if gccurrent else f"Smart Pro Managed — {identity['installation_id']}"
+        gcnode = migration_canary_state.get('expected_agent_label') if gccurrent else (mesh_identity_status.get('agent_label') or '—')
+        gcresult = migration_canary_state.get('result_code') if gccurrent else '—'
+        gcelapsed = str(migration_canary_state.get('elapsed_seconds') or '—') if gccurrent else '—'
+        gcsharedstop = 'ΝΑΙ' if gccurrent and migration_canary_state.get('shared_runtime_stopped') else 'ΟΧΙ'
+        gcreuse = 'ΝΑΙ' if gccurrent and migration_canary_state.get('stable_identity_reused') else 'ΟΧΙ'
+        gcexec = 'ΝΑΙ — CANARY ONLY' if gccurrent and migration_canary_state.get('target_meshagent_execution') else 'ΟΧΙ'
+        gcrollback = 'ΝΑΙ' if gccurrent and migration_canary_state.get('rollback_shared_runtime_requested') else 'ΟΧΙ'
+        gcrollbackstart = 'ΝΑΙ' if gccurrent and migration_canary_state.get('rollback_shared_runtime_started') else 'ΟΧΙ'
+        gccleanup = 'ΝΑΙ' if gccurrent and migration_canary_state.get('runtime_directory_deleted') else 'ΟΧΙ'
+        gcdisabled = ' disabled' if (not overall or MIGRATION_CANARY_WORKER_ACTIVE or not PERSISTENT_WORKER_ACTIVE) else ''
+        migration_canary_html = f"""
+<section class="pairbox">
+<h2>Controlled per-installation group migration canary</h2>
+<p>Πρώτο πραγματικό migration test. Σταματά προσωρινά και με ασφάλεια το shared unattended runtime, ξαναπαίρνει το verified target .msh, αντιγράφει <strong>την ίδια προστατευμένη stable meshagent.db</strong> χωρίς να αλλάξει το persisted binding, και εκτελεί foreground MeshAgent προς το target group για έως 45″. Μετά σταματά το target runtime, διαγράφει το προσωρινό περιβάλλον και ζητά rollback στο κανονικό shared unattended runtime. <strong>Δεν γίνεται permanent runtime-source switch, identity-binding commit ή technician authorization.</strong></p>
+<div class="mini-grid">
+<div><span>Κατάσταση</span><strong>{esc(gclabel)}</strong></div>
+<div><span>Target group</span><strong>{esc(gcgroup)}</strong></div>
+<div><span>Expected stable node</span><strong>{esc(gcnode)}</strong></div>
+<div><span>Shared runtime stopped</span><strong>{esc(gcsharedstop)}</strong></div>
+<div><span>Stable identity reused</span><strong>{esc(gcreuse)}</strong></div>
+<div><span>Target MeshAgent execution</span><strong>{esc(gcexec)}</strong></div>
+<div><span>Result</span><strong>{esc(gcresult)}</strong></div>
+<div><span>Elapsed</span><strong>{esc(gcelapsed)} s</strong></div>
+<div><span>Runtime directory deleted</span><strong>{esc(gccleanup)}</strong></div>
+<div><span>Permanent source switch</span><strong>ΟΧΙ</strong></div>
+<div><span>Identity binding commit</span><strong>ΟΧΙ</strong></div>
+<div><span>Technician actions</span><strong>NOT AUTHORIZED</strong></div>
+<div><span>Rollback shared runtime requested</span><strong>{esc(gcrollback)}</strong></div>
+<div><span>Rollback shared runtime started</span><strong>{esc(gcrollbackstart)}</strong></div>
+</div>
+<form method="post" action="group-migration-canary">
+<input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
+<button type="submit"{gcdisabled}>Έναρξη controlled migration canary ≤45″</button>
+</form>
+</section>"""
+
     return f"""<!doctype html>
 <html lang="el"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Smart Pro Managed Support</title>
 <style>
 :root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;background:#10151d;color:#eef5ff;font:14px/1.5 Arial,Helvetica,sans-serif}}main{{max-width:1000px;margin:0 auto;padding:24px}}.hero{{background:#172231;border:1px solid #2c4158;border-radius:16px;padding:22px;margin-bottom:16px}}h1{{margin:0 0 5px;font-size:27px}}h2{{margin:0 0 10px;font-size:18px}}.sub{{color:#aab9ca}}.badge{{display:inline-block;margin-top:14px;padding:8px 12px;border-radius:999px;font-weight:700}}.ok{{background:#173a2a;color:#9ff0bd;border:1px solid #2c7750}}.bad{{background:#442128;color:#ffb5c0;border:1px solid #8c3d4d}}.warn{{background:#43381a;color:#ffe49a;border:1px solid #8b7331}}.note{{margin-top:15px;padding:13px 15px;border-radius:10px;background:#12293a;border:1px solid #245473;color:#cfeeff}}.notice{{margin:0 0 16px;padding:12px 14px;border-radius:10px}}.notice-ok{{background:#173a2a;border:1px solid #2c7750;color:#bdf7d0}}.notice-bad{{background:#442128;border:1px solid #8c3d4d;color:#ffd0d6}}.notice-info{{background:#12293a;border:1px solid #245473;color:#cfeeff}}.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.card,.pairbox{{background:#171d26;border:1px solid #293646;border-radius:12px;padding:15px}}.k{{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:#8fa1b5}}.v{{font-size:15px;font-weight:700;margin-top:4px;overflow-wrap:anywhere}}.pairbox{{margin:16px 0}}.pairbox p{{color:#b7c5d5}}label{{display:block;font-weight:700;margin:12px 0 6px}}input{{width:100%;max-width:460px;padding:11px 12px;border-radius:8px;border:1px solid #3b4c60;background:#0f151d;color:#fff;font:inherit}}button{{display:block;margin-top:12px;border:0;border-radius:8px;padding:10px 14px;background:#19aee8;color:#06131b;font-weight:800;cursor:pointer}}button:disabled,input:disabled{{opacity:.5;cursor:not-allowed}}code{{color:#9fdfff}}.mini-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.mini-grid div{{background:#111821;border:1px solid #28384a;border-radius:9px;padding:10px}}.mini-grid span{{display:block;color:#8fa1b5;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}}.mini-grid strong{{overflow-wrap:anywhere}}.footer{{margin-top:18px;color:#7f91a6;font-size:12px}}@media(max-width:650px){{main{{padding:14px}}.grid,.mini-grid{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.11.1 · Per-Installation Target Settings Verification Consumer · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
+<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.12.0 · Per-Installation Group Execution Migration Canary · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
 {notice_html}
 {pair_html}
 {enrollment_html}
@@ -3457,6 +3792,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 {persistent_html}
 {migration_preflight_html}
 {migration_target_settings_html}
+{migration_canary_html}
 <section class="grid">
 <div class="card"><div class="k">Installation ID</div><div class="v">{esc(policy.get('installation_id') or (identity or {}).get('installation_id'))}</div></div>
 <div class="card"><div class="k">Smart Pro Tools</div><div class="v">v{esc((policy.get('source') or {}).get('addon_version'))} · Online: {esc(tools_online)}</div></div>
@@ -3472,12 +3808,12 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <div class="card"><div class="k">MeshCentral stable identity</div><div class="v">{esc(mesh_identity_label)} · generation {esc(mesh_identity_generation)} · runs {esc(mesh_identity_runs)} · DB {esc(mesh_identity_db_hint)} · {esc(mesh_identity_updated)}</div></div>
 <div class="card"><div class="k">Remote access</div><div class="v">Όχι — το node μπορεί να είναι online, αλλά web/Terminal/Files technician actions παραμένουν NOT AUTHORIZED</div></div>
 </section>
-<div class="footer">3.11.1 target settings verification consumer. Το unattended runtime παραμένει λειτουργικά ίδιο· το target .msh επαληθεύεται one-time μόνο στη μνήμη και δεν εκτελείται ούτε αλλάζει group/runtime source. Ο MeshAgent παραμένει foreground, χωρίς -install/service persistence και χωρίς technician actions.</div>
+<div class="footer">3.12.0 controlled migration canary. Το target .msh εκτελείται μόνο σε αυστηρά περιορισμένο foreground canary με την ήδη προστατευμένη stable identity, χωρίς permanent binding/source commit και χωρίς technician actions. Μετά το canary ζητείται rollback στο shared unattended runtime.</div>
 </main></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SmartProManaged/3.11.1"
+    server_version = "SmartProManaged/3.12.0"
 
     def _send(self, code, body, content_type):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
@@ -3537,6 +3873,9 @@ class Handler(BaseHTTPRequestHandler):
                 "group_migration_preflight_verified": bool(load_group_migration_preflight_state().get("verified")),
                 "group_migration_target_settings_status": load_group_migration_target_settings_state().get("status") or "not_run",
                 "group_migration_target_settings_verified": bool(load_group_migration_target_settings_state().get("verified")),
+                "group_migration_canary_status": load_group_migration_canary_state().get("status") or "not_run",
+                "group_migration_canary_verified": bool(load_group_migration_canary_state().get("verified")),
+                "group_migration_canary_active": bool(MIGRATION_CANARY_WORKER_ACTIVE),
                 "unattended_runtime_enabled": bool(load_unattended_control().get("enabled")),
                 "technician_actions_authorized": False,
                 "installation_id": policy.get("installation_id") or server.get("installation_id"),
@@ -3557,7 +3896,8 @@ class Handler(BaseHTTPRequestHandler):
         is_persistent_stop = path.endswith("/continuous-runtime-stop") or path == "continuous-runtime-stop"
         is_group_migration_preflight = path.endswith("/group-migration-preflight") or path == "group-migration-preflight"
         is_group_migration_target_settings = path.endswith("/group-migration-target-settings") or path == "group-migration-target-settings"
-        if not is_pair and not is_enrollment and not is_settings and not is_agent and not is_runtime and not is_canary and not is_persistent_start and not is_persistent_stop and not is_group_migration_preflight and not is_group_migration_target_settings:
+        is_group_migration_canary = path.endswith("/group-migration-canary") or path == "group-migration-canary"
+        if not is_pair and not is_enrollment and not is_settings and not is_agent and not is_runtime and not is_canary and not is_persistent_start and not is_persistent_stop and not is_group_migration_preflight and not is_group_migration_target_settings and not is_group_migration_canary:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
         length = _as_int(self.headers.get("Content-Length")) or 0
@@ -3573,7 +3913,7 @@ class Handler(BaseHTTPRequestHandler):
         if not secrets.compare_digest(csrf, CSRF_TOKEN):
             self._send(403, render_page(read_policy(), "Η φόρμα ενεργοποίησης έληξε. Ανανεώστε τη σελίδα.", "bad"), "text/html; charset=utf-8")
             return
-        if PERSISTENT_WORKER_ACTIVE and not (is_persistent_stop or is_group_migration_preflight or is_group_migration_target_settings):
+        if PERSISTENT_WORKER_ACTIVE and not (is_persistent_stop or is_group_migration_preflight or is_group_migration_target_settings or is_group_migration_canary):
             self._send(409, render_page(read_policy(), "Η continuous Managed λειτουργία είναι ενεργή. Επιτρέπονται μόνο ασφαλής τερματισμός ή οι verification-only migration έλεγχοι.", "bad"), "text/html; charset=utf-8")
             return
         if is_pair:
@@ -3669,6 +4009,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(409, render_page(read_policy(), message, "bad"), "text/html; charset=utf-8")
             return
 
+        if is_group_migration_canary:
+            try:
+                start_group_migration_canary()
+                self._send(202, render_page(read_policy(), "Το controlled migration canary ξεκίνησε. Κρατήστε ανοιχτό το MeshCentral: η ΙΔΙΑ stable συσκευή πρέπει προσωρινά να εμφανιστεί στο Smart Pro Managed — ID-95948 και μετά, όταν λήξει το canary, να επιστρέψει αυτόματα στο shared group. Μην ανοίξετε Desktop/Terminal/Files. Κάντε refresh εδώ μετά από περίπου 55–70 δευτερόλεπτα.", "info"), "text/html; charset=utf-8")
+            except RuntimeError as exc:
+                message=str(exc).partition('|')[2] or "Δεν ήταν δυνατή η εκκίνηση του controlled migration canary."
+                self._send(409,render_page(read_policy(),message,"bad"),"text/html; charset=utf-8")
+            return
+
         if is_persistent_start:
             try:
                 save_unattended_control(True, 'admin_enabled')
@@ -3749,7 +4098,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"[managed] Smart Pro Managed Support {VERSION} per-installation target settings verification consumer listening on {PORT}", flush=True)
+    print(f"[managed] Smart Pro Managed Support {VERSION} per-installation group execution migration canary listening on {PORT}", flush=True)
     boot_identity = get_mesh_identity_status(load_identity())
     boot_control = load_unattended_control()
     print(f"[managed] mesh identity state={boot_identity.get('state')} generation={boot_identity.get('generation', 0)} continuity_runs={boot_identity.get('continuity_runs', 0)}; unattended_enabled={str(bool(boot_control.get('enabled'))).lower()}", flush=True)

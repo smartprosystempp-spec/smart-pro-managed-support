@@ -1,3 +1,13 @@
+## 3.12.0 — Controlled Per-Installation Group Migration Canary
+
+- Adds Broker 0.38.0 request/consume/watch/report canary consumer.
+- Temporarily stops the shared unattended foreground runtime under an in-process migration lock.
+- Re-fetches and verifies target .msh and MeshAgent binary.
+- Reuses the exact protected stable meshagent.db without committing the target binding.
+- Runs target-group foreground MeshAgent for <=45 seconds, then terminates and deletes the runtime directory.
+- Requests rollback to the proven shared unattended runtime.
+- No permanent runtime-source switch, no identity-binding commit, no technician access.
+
 # Changelog
 
 ## 3.11.1 — Unicode-Safe Target Binding Hotfix

@@ -1,6 +1,6 @@
 name: "Smart Pro Managed Support"
-description: "Per-Installation Group Migration Preflight Consumer. Διατηρεί το σταθερό unattended runtime και προσθέτει authenticated metadata-only preflight για migration σε group ανά Installation ID, χωρίς ακόμη target .msh delivery, node move, runtime source switch ή technician actions."
-version: "3.11.1"
+description: "Controlled Per-Installation Group Migration Canary. Επαναχρησιμοποιεί την ίδια stable MeshAgent identity σε target group για έως 45s και κάνει rollback στο shared unattended runtime, χωρίς permanent binding/source commit ή technician actions."
+version: "3.12.0"
 slug: "smart_pro_managed_support"
 arch:
   - aarch64
