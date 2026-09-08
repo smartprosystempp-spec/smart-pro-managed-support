@@ -21,7 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.10.0")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.11.0")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -39,6 +39,7 @@ CANARY_STATE_FILE = DATA_DIR / "identity-continuity-canary.json"
 PERSISTENT_STATE_FILE = DATA_DIR / "continuous-runtime-state.json"
 UNATTENDED_CONTROL_FILE = DATA_DIR / "unattended-runtime-control.json"
 GROUP_MIGRATION_PREFLIGHT_FILE = DATA_DIR / "group-migration-preflight.json"
+GROUP_MIGRATION_TARGET_SETTINGS_FILE = DATA_DIR / "group-migration-target-settings.json"
 MESH_IDENTITY_DIR = DATA_DIR / "meshagent-identity"
 MESH_IDENTITY_DB_FILE = MESH_IDENTITY_DIR / "meshagent.db"
 MESH_IDENTITY_META_FILE = MESH_IDENTITY_DIR / "identity-meta.json"
@@ -60,6 +61,7 @@ NODE_ID_RE = re.compile(r"^SPMN-[A-F0-9]{32}$")
 NODE_SECRET_RE = re.compile(r"^SPMS-[A-Za-z0-9_-]{43}$")
 BOOTSTRAP_TICKET_RE = re.compile(r"^SPMB-[A-Za-z0-9_-]{43}$")
 SETTINGS_TICKET_RE = re.compile(r"^SPMD-[A-Za-z0-9_-]{43}$")
+TARGET_SETTINGS_TICKET_RE = re.compile(r"^SPGMT-[A-Za-z0-9_-]{43}$")
 AGENT_TICKET_RE = re.compile(r"^SPMA-[A-Za-z0-9_-]{43}$")
 RUNTIME_LEASE_RE = re.compile(r"^SPMRL-[A-Za-z0-9_-]{43}$")
 CANARY_TICKET_RE = re.compile(r"^SPMEC-[A-Za-z0-9_-]{43}$")
@@ -2776,6 +2778,203 @@ def verify_group_migration_preflight():
         raise
 
 
+
+def load_group_migration_target_settings_state():
+    base = {
+        "status": "not_run", "verified": False, "checked_at": 0,
+        "installation_id": "", "node_id": "", "client_version": "", "architecture": "",
+        "target_group_name": "", "target_mesh_id_hint": "", "target_binding_hint": "",
+        "target_source_fingerprint_hint": "", "shared_source_fingerprint_hint": "",
+        "expected_agent_label": "", "mesh_server_host": "", "sha256_hint": "", "bytes": 0,
+        "target_msh_memory_only": False, "runtime_source_switch": False, "node_move": False,
+        "identity_binding_commit": False, "meshagent_execution": False,
+        "technician_actions_authorized": False, "error_code": "", "error_message": "",
+    }
+    try:
+        if not GROUP_MIGRATION_TARGET_SETTINGS_FILE.exists():
+            return base
+        st = GROUP_MIGRATION_TARGET_SETTINGS_FILE.stat()
+        if st.st_size <= 0 or st.st_size > 32768:
+            return base
+        data = json.loads(GROUP_MIGRATION_TARGET_SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return base
+    if not isinstance(data, dict):
+        return base
+    for key in base:
+        if key in data:
+            base[key] = data[key]
+    return base
+
+
+def save_group_migration_target_settings_state(state):
+    """Persist non-secret target-settings verification metadata only; never persist ticket or raw .msh."""
+    allowed = {
+        "status", "verified", "checked_at", "installation_id", "node_id", "client_version", "architecture",
+        "target_group_name", "target_mesh_id_hint", "target_binding_hint", "target_source_fingerprint_hint",
+        "shared_source_fingerprint_hint", "expected_agent_label", "mesh_server_host", "sha256_hint", "bytes",
+        "target_msh_memory_only", "runtime_source_switch", "node_move", "identity_binding_commit",
+        "meshagent_execution", "technician_actions_authorized", "error_code", "error_message",
+    }
+    payload = {k: state.get(k) for k in allowed if k in state}
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = GROUP_MIGRATION_TARGET_SETTINGS_FILE.with_suffix('.tmp')
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            json.dump(payload, handle, ensure_ascii=False, separators=(',', ':'))
+            handle.flush(); os.fsync(handle.fileno())
+        os.replace(tmp, GROUP_MIGRATION_TARGET_SETTINGS_FILE)
+        os.chmod(GROUP_MIGRATION_TARGET_SETTINGS_FILE, 0o600)
+    finally:
+        try:
+            if tmp.exists(): tmp.unlink()
+        except OSError:
+            pass
+
+
+def verify_group_migration_target_settings():
+    """One-time Broker 0.37 target .msh delivery + strict in-memory verification. Never executes MeshAgent."""
+    identity = load_identity()
+    if identity is None:
+        raise RuntimeError('group_target_not_paired|Απαιτείται ενεργή Managed identity πριν από target .msh verification.')
+    local = read_policy()
+    if not local.get('allowed_local'):
+        raise RuntimeError('group_target_local_policy_denied|Η τοπική Managed πολιτική δεν επιτρέπει target .msh verification.')
+    server = get_server_state()
+    if not server.get('authorized_server') or (_as_int(server.get('valid_until')) or 0) <= now_ts():
+        raise RuntimeError('group_target_server_authorization_denied|Απαιτείται ενεργή Broker Server Authorization πριν από target .msh verification.')
+    if ARCH not in ELF_MACHINE:
+        raise RuntimeError('group_target_architecture_invalid|Η αρχιτεκτονική του add-on δεν υποστηρίζεται για target .msh verification.')
+    mesh_identity = get_mesh_identity_status(identity)
+    if mesh_identity.get('state') != 'ready':
+        raise RuntimeError('group_target_identity_not_ready|Η σταθερή MeshCentral identity δεν είναι READY.')
+
+    # Always refresh the authenticated metadata-only preflight immediately before delivery.
+    preflight = verify_group_migration_preflight()
+    if preflight.get('verified') is not True:
+        raise RuntimeError('group_target_preflight_not_ready|Το migration preflight δεν είναι VERIFIED.')
+    expected_group = preflight.get('target_group_name') or f"Smart Pro Managed — {identity['installation_id']}"
+    expected_label = _safe_str(preflight.get('expected_agent_label'), 80).upper()
+    try:
+        common = {
+            'node_id': identity['node_id'], 'node_secret': identity['node_secret'],
+            'client_version': VERSION, 'architecture': ARCH,
+        }
+        req = broker_post('/managed/group-migration/target-settings/request', common)
+        ticket = _safe_str(req.get('target_settings_ticket'), 90)
+        if not (
+            req.get('success') is True and req.get('phase') == 'per_installation_group_target_settings_request'
+            and req.get('contract_id') == 'smart-pro-managed-group-target-settings-v1'
+            and _as_int(req.get('schema_version')) == 1
+            and TARGET_SETTINGS_TICKET_RE.fullmatch(ticket) is not None
+            and (_as_int(req.get('expires_at')) or 0) > now_ts()
+        ):
+            raise RuntimeError('group_target_request_invalid|Ο Broker δεν επέστρεψε έγκυρο one-time target settings contract.')
+        for field, expected in (
+            ('installation_ref', identity['installation_id']),
+            ('target_group_name', expected_group),
+            ('target_mesh_id_hint', preflight.get('target_mesh_id_hint')),
+            ('target_binding_hint', preflight.get('target_binding_hint')),
+            ('target_source_fingerprint_hint', preflight.get('target_source_fingerprint_hint')),
+            ('shared_source_fingerprint_hint', preflight.get('shared_source_fingerprint_hint')),
+            ('expected_agent_label', expected_label),
+        ):
+            actual = _safe_str(req.get(field), 200)
+            if not secrets.compare_digest(actual, _safe_str(expected, 200)):
+                raise RuntimeError('group_target_request_binding_mismatch|Το target settings request δεν συμφωνεί με το verified migration preflight.')
+        for flag in ('target_msh_delivered','meshagent_execution','node_move','runtime_source_switch','identity_binding_commit','technician_actions_authorized','remote_access'):
+            if req.get(flag) is not False:
+                raise RuntimeError('group_target_request_safety_boundary|Το target settings request παραβιάζει το verification-only safety boundary.')
+
+        consume_payload = dict(common); consume_payload['target_settings_ticket'] = ticket
+        res = broker_post('/managed/group-migration/target-settings/consume', consume_payload)
+        ticket = ''  # raw one-time ticket deliberately discarded immediately after consume
+        if not (
+            res.get('success') is True and res.get('phase') == 'per_installation_group_target_settings_consume'
+            and res.get('contract_id') == 'smart-pro-managed-group-target-settings-v1'
+            and _as_int(res.get('schema_version')) == 1
+            and res.get('target_msh_delivered') is True
+            and res.get('meshagent_execution') is False and res.get('node_move') is False
+            and res.get('runtime_source_switch') is False and res.get('identity_binding_commit') is False
+            and res.get('technician_actions_authorized') is False and res.get('remote_access') is False
+        ):
+            raise RuntimeError('group_target_consume_invalid|Ο Broker δεν επέστρεψε έγκυρο verification-only target .msh consume contract.')
+        encoded = _safe_str(res.get('data'), MAX_RESPONSE_BYTES)
+        try:
+            raw = base64.b64decode(encoded.encode('ascii'), validate=True)
+        except (UnicodeEncodeError, binascii.Error, ValueError):
+            raise RuntimeError('group_target_base64_invalid|Το target .msh payload δεν είναι έγκυρο base64.') from None
+        expected_bytes = _as_int(res.get('bytes')) or 0
+        expected_sha = _safe_str(res.get('sha256'), 64).lower()
+        actual_sha = hashlib.sha256(raw).hexdigest()
+        if expected_bytes != len(raw) or not SHA256_RE.fullmatch(expected_sha) or not secrets.compare_digest(expected_sha, actual_sha):
+            raw = b''
+            raise RuntimeError('group_target_integrity_mismatch|Το target .msh απέτυχε στον τοπικό SHA/bytes έλεγχο ακεραιότητας.')
+        fields = parse_msh_strict(raw)
+        if _safe_str(fields.get('MeshName'), 200) != expected_group:
+            raw = b''
+            raise RuntimeError('group_target_group_mismatch|Το target .msh δεν αντιστοιχεί στο verified per-installation group.')
+        if _safe_str(fields.get('agentName'), 80).upper() != expected_label:
+            raw = b''
+            raise RuntimeError('group_target_agent_label_mismatch|Το target .msh δεν διατηρεί το expected stable SPMNG label.')
+        mesh_id_hint = hashlib.sha256(_safe_str(fields.get('MeshID'), 4096).encode('utf-8')).hexdigest()[:12]
+        binding_material = '\n'.join(_safe_str(fields.get(k), 4096) for k in ('MeshName','MeshType','MeshID','ServerID','MeshServer'))
+        binding_hint = hashlib.sha256(binding_material.encode('utf-8')).hexdigest()[:12]
+        if not secrets.compare_digest(mesh_id_hint, _safe_str(preflight.get('target_mesh_id_hint'), 12).lower()):
+            raw = b''
+            raise RuntimeError('group_target_meshid_mismatch|Το target MeshID δεν συμφωνεί με το verified preflight hint.')
+        if not secrets.compare_digest(binding_hint, _safe_str(preflight.get('target_binding_hint'), 12).lower()):
+            raw = b''
+            raise RuntimeError('group_target_binding_mismatch|Το target MeshCentral binding δεν συμφωνεί με το verified preflight hint.')
+        parsed = urlparse(_safe_str(fields.get('MeshServer'), 4096))
+        if parsed.scheme.lower() != 'wss' or not parsed.hostname:
+            raw = b''
+            raise RuntimeError('group_target_meshserver_invalid|Το target .msh δεν περιέχει ασφαλές WSS MeshServer endpoint.')
+        mesh_server_host = parsed.hostname.lower()
+        if _safe_str(res.get('mesh_server_host'), 255).lower() != mesh_server_host:
+            raw = b''
+            raise RuntimeError('group_target_meshserver_host_mismatch|Το target MeshServer host δεν συμφωνεί με το Broker verification.')
+        target_source_hint = _safe_str(res.get('target_source_fingerprint_hint'), 12).lower()
+        shared_source_hint = _safe_str(res.get('shared_source_fingerprint_hint'), 12).lower()
+        if not FINGERPRINT_HINT_RE.fullmatch(target_source_hint) or not FINGERPRINT_HINT_RE.fullmatch(shared_source_hint):
+            raw = b''
+            raise RuntimeError('group_target_source_hint_invalid|Ο Broker δεν επέστρεψε έγκυρα target/shared source hints.')
+        if not secrets.compare_digest(target_source_hint, _safe_str(preflight.get('target_source_fingerprint_hint'), 12).lower()) or not secrets.compare_digest(shared_source_hint, _safe_str(preflight.get('shared_source_fingerprint_hint'), 12).lower()):
+            raw = b''
+            raise RuntimeError('group_target_source_hint_mismatch|Τα target/shared source hints άλλαξαν μετά το migration preflight.')
+        if secrets.compare_digest(target_source_hint, shared_source_hint):
+            raw = b''
+            raise RuntimeError('group_target_sources_not_distinct|Το target source δεν είναι διαφορετικό από το shared runtime source.')
+
+        state = {
+            'status':'verified', 'verified':True, 'checked_at':now_ts(),
+            'installation_id':identity['installation_id'], 'node_id':identity['node_id'],
+            'client_version':VERSION, 'architecture':ARCH, 'target_group_name':expected_group,
+            'target_mesh_id_hint':mesh_id_hint, 'target_binding_hint':binding_hint,
+            'target_source_fingerprint_hint':target_source_hint, 'shared_source_fingerprint_hint':shared_source_hint,
+            'expected_agent_label':expected_label, 'mesh_server_host':mesh_server_host,
+            'sha256_hint':actual_sha[:12], 'bytes':len(raw), 'target_msh_memory_only':True,
+            'runtime_source_switch':False, 'node_move':False, 'identity_binding_commit':False,
+            'meshagent_execution':False, 'technician_actions_authorized':False,
+            'error_code':'', 'error_message':'',
+        }
+        save_group_migration_target_settings_state(state)
+        raw = b''; encoded = ''
+        print(f"[managed] target group settings VERIFIED for {identity['installation_id']} label={expected_label} group={expected_group}; target_msh_memory_only=true runtime_source_switch=false node_move=false identity_binding_commit=false meshagent_execution=false technician_actions=false", flush=True)
+        return state
+    except RuntimeError as exc:
+        text = str(exc); code, _, message = text.partition('|')
+        save_group_migration_target_settings_state({
+            'status':'failed','verified':False,'checked_at':now_ts(),
+            'installation_id':identity['installation_id'],'node_id':identity['node_id'],
+            'client_version':VERSION,'architecture':ARCH,
+            'error_code':_safe_str(code,100),'error_message':_safe_str(message or 'Το target .msh verification απέτυχε.',300),
+            'target_msh_memory_only':False,'runtime_source_switch':False,'node_move':False,
+            'identity_binding_commit':False,'meshagent_execution':False,'technician_actions_authorized':False,
+        })
+        raise
+
 def heartbeat_worker():
     last_summary = None
     while True:
@@ -2813,6 +3012,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
     canary_state = load_canary_state()
     persistent_state = load_persistent_state()
     migration_preflight_state = load_group_migration_preflight_state()
+    migration_target_settings_state = load_group_migration_target_settings_state()
 
     local_allowed = bool(local_snapshot.get("allowed_local"))
     server_allowed = bool(server.get("authorized_server")) and (_as_int(server.get("valid_until")) or 0) > now_ts()
@@ -2870,6 +3070,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
     canary_html = ""
     persistent_html = ""
     migration_preflight_html = ""
+    migration_target_settings_html = ""
     if identity is not None:
         enrollment_verified = (
             enrollment.get("verified") is True
@@ -3107,7 +3308,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         persistent_html = f"""
 <section class="pairbox">
 <h2>Unattended Managed runtime — restart recovery checkpoint</h2>
-<p>Χρησιμοποιεί <strong>αποκλειστικά την ήδη σταθερή MeshCentral identity</strong>, ανανεώνει βραχύβια runtime leases, ελέγχει συνεχώς τον Broker και αναφέρει health. Όσο οι άδειες παραμένουν έγκυρες, το ίδιο node μπορεί να μένει online χωρίς χρονικό canary limit. Αν χαθεί local policy, subscription/server authorization ή runtime lease, σταματά fail-closed. Το unattended control που αποδείχθηκε στην 3.9.0 <strong>διατηρείται στην 3.10.0</strong>. Αν ήταν ήδη ENABLED, μετά το add-on restart περιμένει έγκυρη local + server authorization και επαναφέρει αυτόματα την ίδια σταθερή συσκευή. Η παύση απενεργοποιεί αυτή την αυτόματη επαναφορά.</p>
+<p>Χρησιμοποιεί <strong>αποκλειστικά την ήδη σταθερή MeshCentral identity</strong>, ανανεώνει βραχύβια runtime leases, ελέγχει συνεχώς τον Broker και αναφέρει health. Όσο οι άδειες παραμένουν έγκυρες, το ίδιο node μπορεί να μένει online χωρίς χρονικό canary limit. Αν χαθεί local policy, subscription/server authorization ή runtime lease, σταματά fail-closed. Το unattended control που αποδείχθηκε στην 3.9.0 <strong>διατηρείται στην 3.11.0</strong>. Αν ήταν ήδη ENABLED, μετά το add-on restart περιμένει έγκυρη local + server authorization και επαναφέρει αυτόματα την ίδια σταθερή συσκευή. Η παύση απενεργοποιεί αυτή την αυτόματη επαναφορά.</p>
 <div class="mini-grid">
 <div><span>Κατάσταση</span><strong>{esc(plabel)}</strong></div>
 <div><span>Έναρξη</span><strong>{esc(pstart)}</strong></div>
@@ -3184,13 +3385,64 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </form>
 </section>"""
 
+        tcurrent = (
+            migration_target_settings_state.get('installation_id') == identity['installation_id']
+            and migration_target_settings_state.get('node_id') == identity['node_id']
+            and migration_target_settings_state.get('client_version') == VERSION
+            and migration_target_settings_state.get('architecture') == ARCH
+        )
+        tstatus = migration_target_settings_state.get('status') if tcurrent else 'not_run'
+        if tstatus == 'verified' and migration_target_settings_state.get('verified') is True:
+            tlabel = 'VERIFIED — TARGET .MSH READY FOR EXECUTION CANARY DESIGN'
+        elif tstatus == 'failed':
+            tlabel = 'FAILED — ' + (migration_target_settings_state.get('error_message') or 'ελέγξτε target settings contract')
+        else:
+            tlabel = 'Δεν έχει εκτελεστεί ακόμη'
+        ttime = fmt_epoch(migration_target_settings_state.get('checked_at')) if tcurrent else '—'
+        tgroup = migration_target_settings_state.get('target_group_name') if tcurrent else f"Smart Pro Managed — {identity['installation_id']}"
+        tmesh = migration_target_settings_state.get('target_mesh_id_hint') if tcurrent else '—'
+        tbinding = migration_target_settings_state.get('target_binding_hint') if tcurrent else '—'
+        ttarget = migration_target_settings_state.get('target_source_fingerprint_hint') if tcurrent else '—'
+        tshared = migration_target_settings_state.get('shared_source_fingerprint_hint') if tcurrent else '—'
+        tlabel_agent = migration_target_settings_state.get('expected_agent_label') if tcurrent else (mesh_identity_status.get('agent_label') or '—')
+        thost = migration_target_settings_state.get('mesh_server_host') if tcurrent else '—'
+        tsha = migration_target_settings_state.get('sha256_hint') if tcurrent else '—'
+        tbytes = str(migration_target_settings_state.get('bytes') or '—') if tcurrent else '—'
+        tdisabled = ' disabled' if (not overall or CANARY_WORKER_ACTIVE) else ''
+        migration_target_settings_html = f"""
+<section class="pairbox">
+<h2>Per-installation target .msh verification</h2>
+<p>Ανανεώνει πρώτα το authenticated migration preflight και μετά ζητά/καταναλώνει <strong>ένα one-time target settings ticket</strong> από τον Broker 0.37.0+. Το target .msh επαληθεύεται αυστηρά <strong>μόνο στη μνήμη</strong>: group, MeshID/binding, WSS host, SHA/bytes και το ίδιο stable <code>SPMNG-...</code> label. <strong>Δεν γράφεται σε /data, δεν εκτελείται MeshAgent, δεν μετακινείται node, δεν αλλάζει runtime source και δεν γίνεται identity-binding commit.</strong> Μπορεί να εκτελεστεί ενώ το υπάρχον shared unattended runtime παραμένει online.</p>
+<div class="mini-grid">
+<div><span>Κατάσταση</span><strong>{esc(tlabel)}</strong></div>
+<div><span>Τελευταίος έλεγχος</span><strong>{esc(ttime)}</strong></div>
+<div><span>Target group</span><strong>{esc(tgroup)}</strong></div>
+<div><span>Expected stable node</span><strong>{esc(tlabel_agent)}</strong></div>
+<div><span>Target MeshID hint</span><strong>{esc(tmesh)}</strong></div>
+<div><span>Target binding hint</span><strong>{esc(tbinding)}</strong></div>
+<div><span>Target source hint</span><strong>{esc(ttarget)}</strong></div>
+<div><span>Shared source hint</span><strong>{esc(tshared)}</strong></div>
+<div><span>MeshServer host</span><strong>{esc(thost)}</strong></div>
+<div><span>Target runtime SHA-256 hint</span><strong>{esc(tsha)}</strong></div>
+<div><span>Bytes</span><strong>{esc(tbytes)}</strong></div>
+<div><span>Runtime source / Node move</span><strong>ΟΧΙ / ΟΧΙ</strong></div>
+<div><span>Identity binding commit</span><strong>ΟΧΙ</strong></div>
+<div><span>MeshAgent execution</span><strong>ΟΧΙ</strong></div>
+<div><span>Technician actions</span><strong>NOT AUTHORIZED</strong></div>
+</div>
+<form method="post" action="group-migration-target-settings">
+<input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
+<button type="submit"{tdisabled}>Έλεγχος target .msh</button>
+</form>
+</section>"""
+
     return f"""<!doctype html>
 <html lang="el"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Smart Pro Managed Support</title>
 <style>
 :root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;background:#10151d;color:#eef5ff;font:14px/1.5 Arial,Helvetica,sans-serif}}main{{max-width:1000px;margin:0 auto;padding:24px}}.hero{{background:#172231;border:1px solid #2c4158;border-radius:16px;padding:22px;margin-bottom:16px}}h1{{margin:0 0 5px;font-size:27px}}h2{{margin:0 0 10px;font-size:18px}}.sub{{color:#aab9ca}}.badge{{display:inline-block;margin-top:14px;padding:8px 12px;border-radius:999px;font-weight:700}}.ok{{background:#173a2a;color:#9ff0bd;border:1px solid #2c7750}}.bad{{background:#442128;color:#ffb5c0;border:1px solid #8c3d4d}}.warn{{background:#43381a;color:#ffe49a;border:1px solid #8b7331}}.note{{margin-top:15px;padding:13px 15px;border-radius:10px;background:#12293a;border:1px solid #245473;color:#cfeeff}}.notice{{margin:0 0 16px;padding:12px 14px;border-radius:10px}}.notice-ok{{background:#173a2a;border:1px solid #2c7750;color:#bdf7d0}}.notice-bad{{background:#442128;border:1px solid #8c3d4d;color:#ffd0d6}}.notice-info{{background:#12293a;border:1px solid #245473;color:#cfeeff}}.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.card,.pairbox{{background:#171d26;border:1px solid #293646;border-radius:12px;padding:15px}}.k{{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:#8fa1b5}}.v{{font-size:15px;font-weight:700;margin-top:4px;overflow-wrap:anywhere}}.pairbox{{margin:16px 0}}.pairbox p{{color:#b7c5d5}}label{{display:block;font-weight:700;margin:12px 0 6px}}input{{width:100%;max-width:460px;padding:11px 12px;border-radius:8px;border:1px solid #3b4c60;background:#0f151d;color:#fff;font:inherit}}button{{display:block;margin-top:12px;border:0;border-radius:8px;padding:10px 14px;background:#19aee8;color:#06131b;font-weight:800;cursor:pointer}}button:disabled,input:disabled{{opacity:.5;cursor:not-allowed}}code{{color:#9fdfff}}.mini-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.mini-grid div{{background:#111821;border:1px solid #28384a;border-radius:9px;padding:10px}}.mini-grid span{{display:block;color:#8fa1b5;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}}.mini-grid strong{{overflow-wrap:anywhere}}.footer{{margin-top:18px;color:#7f91a6;font-size:12px}}@media(max-width:650px){{main{{padding:14px}}.grid,.mini-grid{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.10.0 · Per-Installation Group Migration Preflight Consumer · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
+<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.11.0 · Per-Installation Target Settings Verification Consumer · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
 {notice_html}
 {pair_html}
 {enrollment_html}
@@ -3200,6 +3452,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 {canary_html}
 {persistent_html}
 {migration_preflight_html}
+{migration_target_settings_html}
 <section class="grid">
 <div class="card"><div class="k">Installation ID</div><div class="v">{esc(policy.get('installation_id') or (identity or {}).get('installation_id'))}</div></div>
 <div class="card"><div class="k">Smart Pro Tools</div><div class="v">v{esc((policy.get('source') or {}).get('addon_version'))} · Online: {esc(tools_online)}</div></div>
@@ -3215,12 +3468,12 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <div class="card"><div class="k">MeshCentral stable identity</div><div class="v">{esc(mesh_identity_label)} · generation {esc(mesh_identity_generation)} · runs {esc(mesh_identity_runs)} · DB {esc(mesh_identity_db_hint)} · {esc(mesh_identity_updated)}</div></div>
 <div class="card"><div class="k">Remote access</div><div class="v">Όχι — το node μπορεί να είναι online, αλλά web/Terminal/Files technician actions παραμένουν NOT AUTHORIZED</div></div>
 </section>
-<div class="footer">3.10.0 migration preflight consumer. Το αποδεδειγμένο 3.9 unattended runtime παραμένει λειτουργικά ίδιο· το νέο preflight είναι metadata-only και δεν αλλάζει group/runtime source. Ο MeshAgent παραμένει foreground, χωρίς -install/service persistence και χωρίς technician actions.</div>
+<div class="footer">3.11.0 target settings verification consumer. Το unattended runtime παραμένει λειτουργικά ίδιο· το target .msh επαληθεύεται one-time μόνο στη μνήμη και δεν εκτελείται ούτε αλλάζει group/runtime source. Ο MeshAgent παραμένει foreground, χωρίς -install/service persistence και χωρίς technician actions.</div>
 </main></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SmartProManaged/3.10.0"
+    server_version = "SmartProManaged/3.11.0"
 
     def _send(self, code, body, content_type):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
@@ -3278,6 +3531,8 @@ class Handler(BaseHTTPRequestHandler):
                 "continuous_runtime_reconnects": load_persistent_state().get("reconnect_count") or 0,
                 "group_migration_preflight_status": load_group_migration_preflight_state().get("status") or "not_run",
                 "group_migration_preflight_verified": bool(load_group_migration_preflight_state().get("verified")),
+                "group_migration_target_settings_status": load_group_migration_target_settings_state().get("status") or "not_run",
+                "group_migration_target_settings_verified": bool(load_group_migration_target_settings_state().get("verified")),
                 "unattended_runtime_enabled": bool(load_unattended_control().get("enabled")),
                 "technician_actions_authorized": False,
                 "installation_id": policy.get("installation_id") or server.get("installation_id"),
@@ -3297,7 +3552,8 @@ class Handler(BaseHTTPRequestHandler):
         is_persistent_start = path.endswith("/continuous-runtime-start") or path == "continuous-runtime-start"
         is_persistent_stop = path.endswith("/continuous-runtime-stop") or path == "continuous-runtime-stop"
         is_group_migration_preflight = path.endswith("/group-migration-preflight") or path == "group-migration-preflight"
-        if not is_pair and not is_enrollment and not is_settings and not is_agent and not is_runtime and not is_canary and not is_persistent_start and not is_persistent_stop and not is_group_migration_preflight:
+        is_group_migration_target_settings = path.endswith("/group-migration-target-settings") or path == "group-migration-target-settings"
+        if not is_pair and not is_enrollment and not is_settings and not is_agent and not is_runtime and not is_canary and not is_persistent_start and not is_persistent_stop and not is_group_migration_preflight and not is_group_migration_target_settings:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
         length = _as_int(self.headers.get("Content-Length")) or 0
@@ -3313,8 +3569,8 @@ class Handler(BaseHTTPRequestHandler):
         if not secrets.compare_digest(csrf, CSRF_TOKEN):
             self._send(403, render_page(read_policy(), "Η φόρμα ενεργοποίησης έληξε. Ανανεώστε τη σελίδα.", "bad"), "text/html; charset=utf-8")
             return
-        if PERSISTENT_WORKER_ACTIVE and not (is_persistent_stop or is_group_migration_preflight):
-            self._send(409, render_page(read_policy(), "Η continuous Managed λειτουργία είναι ενεργή. Επιτρέπονται μόνο ασφαλής τερματισμός ή το metadata-only group migration preflight.", "bad"), "text/html; charset=utf-8")
+        if PERSISTENT_WORKER_ACTIVE and not (is_persistent_stop or is_group_migration_preflight or is_group_migration_target_settings):
+            self._send(409, render_page(read_policy(), "Η continuous Managed λειτουργία είναι ενεργή. Επιτρέπονται μόνο ασφαλής τερματισμός ή οι verification-only migration έλεγχοι.", "bad"), "text/html; charset=utf-8")
             return
         if is_pair:
             if load_identity() is not None:
@@ -3390,6 +3646,23 @@ class Handler(BaseHTTPRequestHandler):
                     render_page(read_policy(), message or "Ο έλεγχος secure settings απέτυχε.", "bad"),
                     "text/html; charset=utf-8",
                 )
+            return
+
+        if is_group_migration_target_settings:
+            try:
+                verify_group_migration_target_settings()
+                self._send(
+                    200,
+                    render_page(
+                        read_policy(),
+                        "Το per-installation target .msh παραδόθηκε one-time και επαληθεύτηκε αυστηρά μόνο στη μνήμη. Δεν εκτελέστηκε MeshAgent, δεν μετακινήθηκε node, δεν άλλαξε runtime source και δεν έγινε identity-binding commit.",
+                        "ok",
+                    ),
+                    "text/html; charset=utf-8",
+                )
+            except RuntimeError as exc:
+                message = str(exc).partition('|')[2] or "Το target .msh verification απέτυχε."
+                self._send(409, render_page(read_policy(), message, "bad"), "text/html; charset=utf-8")
             return
 
         if is_persistent_start:
@@ -3472,7 +3745,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"[managed] Smart Pro Managed Support {VERSION} per-installation group migration preflight consumer listening on {PORT}", flush=True)
+    print(f"[managed] Smart Pro Managed Support {VERSION} per-installation target settings verification consumer listening on {PORT}", flush=True)
     boot_identity = get_mesh_identity_status(load_identity())
     boot_control = load_unattended_control()
     print(f"[managed] mesh identity state={boot_identity.get('state')} generation={boot_identity.get('generation', 0)} continuity_runs={boot_identity.get('continuity_runs', 0)}; unattended_enabled={str(bool(boot_control.get('enabled'))).lower()}", flush=True)
