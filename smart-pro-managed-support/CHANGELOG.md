@@ -1,3 +1,13 @@
+# 3.13.0 — Clean Per-Installation Identity Reseed Canary
+
+- Preserves the current stable shared-group identity unchanged as rollback.
+- Adds Broker 0.39.0 clean-reseed request/consume/watch/report consumer.
+- Executes verified target .msh for <=45s without copying the existing meshagent.db.
+- Persists exactly one fresh candidate meshagent.db in a separate 0700/0600 quarantine area.
+- Refuses a second reseed while a candidate is already quarantined.
+- No permanent runtime-source switch, no active identity-binding commit, no old-node deletion, no technician authorization.
+- Retires the 3.12 stable-identity group-move canary button after live proof that identity reuse does not move an existing MeshCentral node.
+
 ## 3.12.0 — Controlled Per-Installation Group Migration Canary
 
 - Adds Broker 0.38.0 request/consume/watch/report canary consumer.

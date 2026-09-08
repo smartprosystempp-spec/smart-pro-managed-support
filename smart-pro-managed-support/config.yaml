@@ -1,6 +1,6 @@
 name: "Smart Pro Managed Support"
-description: "Controlled Per-Installation Group Migration Canary. Επαναχρησιμοποιεί την ίδια stable MeshAgent identity σε target group για έως 45s και κάνει rollback στο shared unattended runtime, χωρίς permanent binding/source commit ή technician actions."
-version: "3.12.0"
+description: "Clean Per-Installation Identity Reseed Canary. Διατηρεί την υπάρχουσα stable identity ως rollback και δημιουργεί μία quarantined fresh candidate identity απευθείας στο verified per-installation group, χωρίς permanent binding/source commit ή technician actions."
+version: "3.13.0"
 slug: "smart_pro_managed_support"
 arch:
   - aarch64
