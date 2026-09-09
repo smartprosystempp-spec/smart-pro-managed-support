@@ -21,12 +21,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.15.2")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.15.3")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
     "SMART_PRO_BROKER_BASE_URL",
-    "https://smart-pro-system.gr/wp-json/smart-pro-remote/v1",
+    "https://api.smart-pro-system.gr/wp-json/smart-pro-remote/v1",
 ).rstrip("/")
 POLICY_FILE = Path("/share/smart-pro-system/managed-policy.json")
 DATA_DIR = Path("/data")

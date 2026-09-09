@@ -1,3 +1,9 @@
+# Changelog
+
+## 3.15.3
+- Switched the default Managed Broker base URL from the public site hostname to the dedicated API gateway: `https://api.smart-pro-system.gr/wp-json/smart-pro-remote/v1`.
+- No change to identity files, promoted TARGET runtime, MeshAgent execution logic, lease logic, rollback backup, group binding, technician authorization, or MeshCentral node lifecycle.
+
 # 3.15.2 — Persistent Runtime Source Telemetry Hotfix
 
 - Fixes the live 3.15.1 promotion failure `promotion_target_runtime_start_timeout`.

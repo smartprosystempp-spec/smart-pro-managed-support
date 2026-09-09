@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-VERSION="${SMART_PRO_MANAGED_VERSION:-3.15.2}"
+VERSION="${SMART_PRO_MANAGED_VERSION:-3.15.3}"
 PORT="8098"
 
 umask 077
@@ -10,10 +10,10 @@ ulimit -c 0 2>/dev/null || true
 echo "===================================================="
 echo "  Smart Pro Managed Support"
 echo "===================================================="
-echo "Κατάσταση: PER-INSTALLATION PERMANENT CANDIDATE PROMOTION ${VERSION}"
+echo "Κατάσταση: PER-INSTALLATION TARGET RUNTIME + DEDICATED API GATEWAY ${VERSION}"
 echo "Το Ingress UI ακούει μόνο στο εσωτερικό port ${PORT}."
-echo "Ενεργά: verified Managed chain + unattended renewable runtime + verified per-installation target + quarantined candidate + rollback-first permanent promotion."
-echo "Promotion: candidate -> νέα stable identity με local rollback backup και target per-installation runtime source. Ο παλιός MeshCentral node δεν διαγράφεται πριν ολοκληρωθεί post-promotion QA."
+echo "Ενεργά: verified per-installation target runtime + unattended renewable leases + dedicated Smart Pro API gateway endpoint."
+echo "Broker endpoint: https://api.smart-pro-system.gr/wp-json/smart-pro-remote/v1 — machine-to-machine μόνο. Identity/runtime source παραμένουν TARGET."
 echo "Ανενεργά: MeshAgent -install, service/systemd persistence, technician web/Terminal/Files/Desktop authorization. Raw lease/tickets/control token δεν αποθηκεύονται."
 echo "===================================================="
 
