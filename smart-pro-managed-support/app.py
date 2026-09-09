@@ -21,7 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.14.0")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.15.0")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -43,6 +43,8 @@ GROUP_MIGRATION_TARGET_SETTINGS_FILE = DATA_DIR / "group-migration-target-settin
 GROUP_MIGRATION_CANARY_FILE = DATA_DIR / "group-migration-canary.json"
 GROUP_IDENTITY_RESEED_FILE = DATA_DIR / "group-identity-reseed-canary.json"
 CANDIDATE_RECONNECT_FILE = DATA_DIR / "candidate-reconnect-verification.json"
+PROMOTION_STATE_FILE = DATA_DIR / "candidate-promotion-state.json"
+MESH_ROLLBACK_DIR = DATA_DIR / "meshagent-identity-shared-rollback"
 MESH_CANDIDATE_DIR = DATA_DIR / "meshagent-candidate-quarantine"
 MESH_CANDIDATE_DB_FILE = MESH_CANDIDATE_DIR / "meshagent.db"
 MESH_CANDIDATE_META_FILE = MESH_CANDIDATE_DIR / "candidate-meta.json"
@@ -74,6 +76,8 @@ IDENTITY_RESEED_TICKET_RE = re.compile(r"^SPMIR-[A-Za-z0-9_-]{43}$")
 IDENTITY_RESEED_REPORT_RE = re.compile(r"^SPMIRR-[A-Za-z0-9_-]{43}$")
 CANDIDATE_RECONNECT_TICKET_RE = re.compile(r"^SPMCR-[A-Za-z0-9_-]{43}$")
 CANDIDATE_RECONNECT_REPORT_RE = re.compile(r"^SPMCRR-[A-Za-z0-9_-]{43}$")
+PROMOTION_TICKET_RE = re.compile(r"^SPMPP-[A-Za-z0-9_-]{43}$")
+PROMOTION_REPORT_RE = re.compile(r"^SPMPPR-[A-Za-z0-9_-]{43}$")
 AGENT_TICKET_RE = re.compile(r"^SPMA-[A-Za-z0-9_-]{43}$")
 RUNTIME_LEASE_RE = re.compile(r"^SPMRL-[A-Za-z0-9_-]{43}$")
 CANARY_TICKET_RE = re.compile(r"^SPMEC-[A-Za-z0-9_-]{43}$")
@@ -101,6 +105,8 @@ IDENTITY_RESEED_WORKER_LOCK = threading.Lock()
 IDENTITY_RESEED_WORKER_ACTIVE = False
 CANDIDATE_RECONNECT_WORKER_LOCK = threading.Lock()
 CANDIDATE_RECONNECT_WORKER_ACTIVE = False
+PROMOTION_WORKER_LOCK = threading.Lock()
+PROMOTION_WORKER_ACTIVE = False
 PERSISTENT_RECONNECT_DELAYS = (5, 10, 20, 30, 60)
 PERSISTENT_MAX_CONSECUTIVE_EXITS = 5
 PERSISTENT_WATCH_FAILURE_GRACE = 45
@@ -110,6 +116,8 @@ IDENTITY_RESEED_LOCAL_MAX_RUNTIME = 45
 IDENTITY_RESEED_SHARED_STOP_TIMEOUT = 20
 CANDIDATE_RECONNECT_LOCAL_MAX_RUNTIME = 45
 CANDIDATE_RECONNECT_SHARED_STOP_TIMEOUT = 20
+PROMOTION_SHARED_STOP_TIMEOUT = 20
+PROMOTION_START_VERIFY_TIMEOUT = 120
 UNATTENDED_STARTUP_DELAY = 8
 UNATTENDED_STALE_RECOVERY_DELAY = 80
 UNATTENDED_FAILURE_RETRY_DELAY = 90
@@ -1484,6 +1492,7 @@ def load_canary_state():
         'runtime_directory_deleted': data.get('runtime_directory_deleted') is True,
         'technician_actions_authorized': False,
         'identity_mode': _safe_str(data.get('identity_mode'), 20),
+        'runtime_source': _safe_str(data.get('runtime_source') or 'shared',20).lower(),
         'identity_db_persisted': data.get('identity_db_persisted') is True,
         'identity_binding_verified': data.get('identity_binding_verified') is True,
         'identity_db_sha256_hint': _safe_str(data.get('identity_db_sha256_hint'), 12).lower(),
@@ -1555,6 +1564,30 @@ def _execution_settings_material(identity):
         'mesh_server_host':parsed.hostname.lower(),'installation_id':identity['installation_id'],'node_id':identity['node_id'],
         'client_version':VERSION,'architecture':ARCH})
     return {'raw':raw,'fields':fields,'agent_label':agent_label,'sha256':sha,'bytes':len(raw)}
+
+
+def _persistent_settings_material(identity, persisted_identity):
+    source=_safe_str((persisted_identity or {}).get('runtime_source') or 'shared',20).lower()
+    if source!='target':
+        material=_execution_settings_material(identity)
+        material['runtime_source']='shared'
+        return material
+    # Keep the existing server-side agent-binary prerequisite satisfied with a fresh
+    # standard secure-settings consume, but never use the shared .msh for target execution.
+    shared_probe=_execution_settings_material(identity)
+    try: shared_probe['raw']=b''
+    except Exception: pass
+    state,material=verify_group_migration_target_settings(return_material=True)
+    expected_group=f"Smart Pro Managed — {identity['installation_id']}"
+    if state.get('verified') is not True or material.get('target_group_name')!=expected_group:
+        raise RuntimeError('persistent_target_settings_not_verified|Το promoted target runtime source δεν επαληθεύτηκε.')
+    for field in ('target_mesh_id_hint','target_binding_hint','target_source_fingerprint_hint','shared_source_fingerprint_hint'):
+        expected=_safe_str((persisted_identity or {}).get(field),20)
+        actual=_safe_str(material.get(field),20)
+        if expected and not secrets.compare_digest(expected,actual):
+            raise RuntimeError('persistent_target_binding_changed|Το promoted target binding άλλαξε μετά το commit.')
+    material['runtime_source']='target'
+    return material
 
 
 def _execution_agent_material(identity, settings_material):
@@ -1777,6 +1810,9 @@ def _validate_persisted_mesh_identity(identity, settings_material=None):
     relative_path = _safe_str(meta.get('runtime_relative_path'),200)
     generation = max(1,_as_int(meta.get('generation')) or 1)
     continuity_runs = max(0,_as_int(meta.get('continuity_runs')) or 0)
+    runtime_source = _safe_str(meta.get('runtime_source') or 'shared',20).lower()
+    if runtime_source not in {'shared','target'}:
+        raise RuntimeError('mesh_identity_runtime_source_invalid|Το MeshAgent identity metadata έχει μη έγκυρο runtime source.')
     if installation_id != identity['installation_id'] or node_id != identity['node_id'] or architecture != ARCH:
         raise RuntimeError('mesh_identity_owner_mismatch|Η αποθηκευμένη MeshAgent ταυτότητα ανήκει σε διαφορετική εγκατάσταση/Managed identity. Η εκτέλεση μπλοκαρίστηκε.')
     if not AGENT_LABEL_RE.fullmatch(agent_label) or not SHA256_RE.fullmatch(db_sha) or not SHA256_RE.fullmatch(binding_sha):
@@ -1798,7 +1834,13 @@ def _validate_persisted_mesh_identity(identity, settings_material=None):
             raise RuntimeError('mesh_identity_msh_binding_mismatch|Τα νέα verified MeshCentral settings δεν ταιριάζουν με την αποθηκευμένη σταθερή ταυτότητα. Η εκτέλεση μπλοκαρίστηκε για αποφυγή duplicate node.')
     return {'state':'ready','generation':generation,'agent_label':agent_label,'db_sha256':actual_sha,'db_bytes':actual_size,
             'binding_sha256':binding_sha,'runtime_relative_path':relative_path,'seeded_at':_as_int(meta.get('seeded_at')) or 0,
-            'updated_at':_as_int(meta.get('updated_at')) or 0,'continuity_runs':continuity_runs}
+            'updated_at':_as_int(meta.get('updated_at')) or 0,'continuity_runs':continuity_runs,
+            'runtime_source':runtime_source,'target_group_name':_safe_str(meta.get('target_group_name'),200),
+            'target_mesh_id_hint':_safe_str(meta.get('target_mesh_id_hint'),20),
+            'target_binding_hint':_safe_str(meta.get('target_binding_hint'),20),
+            'target_source_fingerprint_hint':_safe_str(meta.get('target_source_fingerprint_hint'),20),
+            'shared_source_fingerprint_hint':_safe_str(meta.get('shared_source_fingerprint_hint'),20),
+            'promotion_state':_safe_str(meta.get('promotion_state'),40)}
 
 
 def _copy_persisted_identity_into_runtime(runtime_dir, identity, settings_material):
@@ -1906,11 +1948,20 @@ def _persist_runtime_mesh_identity(runtime_dir, identity, settings_material, pri
     generation=max(1,_as_int((previous_meta or {}).get('generation')) or _as_int((prior or {}).get('generation')) or 1)
     continuity_runs=max(0,_as_int((previous_meta or {}).get('continuity_runs')) or _as_int((prior or {}).get('continuity_runs')) or 0)+1
     binding_sha=_mesh_identity_binding_hash(identity,settings_material)
+    runtime_source=_safe_str((previous_meta or {}).get('runtime_source') or (prior or {}).get('runtime_source') or 'shared',20).lower()
+    if runtime_source not in {'shared','target'}: runtime_source='shared'
     meta={
         'schema_version':1,'installation_id':identity['installation_id'],'broker_node_id':identity['node_id'],'architecture':ARCH,
         'agent_label':_safe_str(settings_material.get('agent_label'),40).upper(),'binding_sha256':binding_sha,
         'db_sha256':db_sha,'db_bytes':db_bytes,'runtime_relative_path':relative_path,'seeded_at':seeded_at,'updated_at':now_ts(),
-        'generation':generation,'continuity_runs':continuity_runs,'service_persistence':False,'technician_actions_authorized':False,
+        'generation':generation,'continuity_runs':continuity_runs,'runtime_source':runtime_source,
+        'target_group_name':_safe_str((previous_meta or {}).get('target_group_name') or settings_material.get('target_group_name'),200),
+        'target_mesh_id_hint':_safe_str((previous_meta or {}).get('target_mesh_id_hint') or settings_material.get('target_mesh_id_hint'),20),
+        'target_binding_hint':_safe_str((previous_meta or {}).get('target_binding_hint') or settings_material.get('target_binding_hint'),20),
+        'target_source_fingerprint_hint':_safe_str((previous_meta or {}).get('target_source_fingerprint_hint') or settings_material.get('target_source_fingerprint_hint'),20),
+        'shared_source_fingerprint_hint':_safe_str((previous_meta or {}).get('shared_source_fingerprint_hint') or settings_material.get('shared_source_fingerprint_hint'),20),
+        'promotion_state':_safe_str((previous_meta or {}).get('promotion_state'),40),
+        'service_persistence':False,'technician_actions_authorized':False,
     }
     tmp_meta=MESH_IDENTITY_DIR / ('.identity-meta.' + secrets.token_hex(6) + '.tmp')
     fd_meta=os.open(tmp_meta,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
@@ -1940,7 +1991,8 @@ def get_mesh_identity_status(identity):
             return {'state':'not_seeded','label':'Δεν έχει αποθηκευτεί ακόμη σταθερή MeshCentral ταυτότητα','generation':0}
         return {'state':'ready','label':'READY — υπάρχει αποθηκευμένη σταθερή MeshCentral ταυτότητα','generation':state.get('generation',0),
                 'agent_label':state.get('agent_label',''),'db_sha256_hint':state.get('db_sha256','')[:12],
-                'updated_at':state.get('updated_at',0),'runtime_relative_path':state.get('runtime_relative_path',''),'continuity_runs':state.get('continuity_runs',0)}
+                'updated_at':state.get('updated_at',0),'runtime_relative_path':state.get('runtime_relative_path',''),'continuity_runs':state.get('continuity_runs',0),
+                'runtime_source':state.get('runtime_source','shared'),'target_group_name':state.get('target_group_name',''),'promotion_state':state.get('promotion_state','')}
     except RuntimeError as exc:
         code,_,message=str(exc).partition('|')
         return {'state':'blocked','label':'BLOCKED — '+(message or code),'generation':0}
@@ -2160,6 +2212,7 @@ def save_persistent_state(state):
         'client_version': _safe_str(state.get('client_version'), 30),
         'architecture': _safe_str(state.get('architecture'), 20),
         'identity_mode': _safe_str(state.get('identity_mode'), 20),
+        'runtime_source': _safe_str(state.get('runtime_source') or 'shared',20).lower(),
         'identity_generation': max(0, _as_int(state.get('identity_generation')) or 0),
         'identity_continuity_runs': max(0, _as_int(state.get('identity_continuity_runs')) or 0),
         'runtime_directory_deleted': state.get('runtime_directory_deleted') is True,
@@ -2246,13 +2299,40 @@ def unattended_supervisor():
             time.sleep(5); continue
         # Migration/reseed workers own the MeshAgent lifecycle while active.
         # The unattended supervisor must not race them by trying to restart the shared runtime.
-        if MIGRATION_CANARY_WORKER_ACTIVE or IDENTITY_RESEED_WORKER_ACTIVE or CANDIDATE_RECONNECT_WORKER_ACTIVE:
+        if MIGRATION_CANARY_WORKER_ACTIVE or IDENTITY_RESEED_WORKER_ACTIVE or CANDIDATE_RECONNECT_WORKER_ACTIVE or PROMOTION_WORKER_ACTIVE:
             time.sleep(2); continue
         if PERSISTENT_WORKER_ACTIVE:
             time.sleep(5); continue
 
         identity = load_identity()
         identity_status = get_mesh_identity_status(identity) if identity else {'state':'not_paired'}
+        if identity and identity_status.get('runtime_source') == 'target' and MESH_ROLLBACK_DIR.exists():
+            promo=load_promotion_state()
+            if promo.get('status') != 'promoted_pending_qa' or promo.get('verified') is not True:
+                # A restart/crash during the distributed promotion window must never leave an
+                # unverified target identity as the unattended source of truth. The old shared
+                # identity was retained specifically for this case, so restore it automatically
+                # before any MeshAgent start. Candidate quarantine remains untouched for review.
+                try:
+                    _restore_shared_identity_from_rollback()
+                    recovered=dict(promo)
+                    recovered.update({'status':'rollback_restored','verified':False,'ended_at':now_ts(),
+                        'result_code':'restart_recovery_rollback','rollback_restored':True,
+                        'rollback_backup_present':False,'runtime_source':'shared',
+                        'old_meshcentral_node_delete':False,'technician_actions_authorized':False,
+                        'error_code':'promotion_restart_recovery',
+                        'error_message':'Unverified target promotion was rolled back automatically after add-on restart.'})
+                    save_promotion_state(recovered)
+                    print('[managed] unattended supervisor restored shared rollback identity after unverified promotion restart; old_node_delete=false technician_actions=false', flush=True)
+                    identity=load_identity()
+                    identity_status=get_mesh_identity_status(identity) if identity else {'state':'not_paired'}
+                    last_log='promotion_restart_rollback_restored'
+                except (RuntimeError,OSError) as exc:
+                    reason='promotion_recovery_failed'
+                    if reason != last_log:
+                        print(f"[managed] unattended supervisor waiting reason=promotion_recovery_failed code={_safe_str(str(exc).partition('|')[0],80)}; no MeshAgent start", flush=True)
+                        last_log=reason
+                    time.sleep(10); continue
         local = read_policy()
         server = get_server_state()
         now = now_ts()
@@ -2394,14 +2474,14 @@ def persistent_runtime_worker():
             'health_state': 'starting', 'last_reason': 'refreshing_verified_chain',
             'installation_id': identity['installation_id'], 'node_id': identity['node_id'],
             'client_version': VERSION, 'architecture': ARCH,
-            'identity_mode': 'reuse', 'identity_generation': prior_identity.get('generation', 0),
+            'identity_mode': 'reuse', 'runtime_source': prior_identity.get('runtime_source','shared'), 'identity_generation': prior_identity.get('generation', 0),
             'identity_continuity_runs': prior_identity.get('continuity_runs', 0),
             'agent_label': prior_identity.get('agent_label', ''), 'runtime_directory_deleted': False,
         }
         save_persistent_state(base_state)
 
         # Fresh verification chain under 3.9.0. Raw settings and binary remain ephemeral.
-        settings = _execution_settings_material(identity)
+        settings = _persistent_settings_material(identity, prior_identity)
         verified_identity = _validate_persisted_mesh_identity(identity, settings)
         if verified_identity.get('state') != 'ready':
             raise RuntimeError('persistent_identity_binding_failed|Η σταθερή MeshCentral identity δεν επαληθεύτηκε με τα νέα .msh settings.')
@@ -3585,6 +3665,9 @@ def start_group_identity_reseed_canary():
             raise RuntimeError('reseed_other_canary_active|Υπάρχει ήδη άλλο Managed canary σε εξέλιξη.')
         if _candidate_quarantine_exists():
             raise RuntimeError('reseed_candidate_already_exists|Υπάρχει ήδη quarantined candidate identity. Δεν επιτρέπεται δεύτερη candidate.')
+        ident=load_identity(); persisted=_validate_persisted_mesh_identity(ident,None) if ident else {'state':'not_paired'}
+        if persisted.get('runtime_source','shared')!='shared':
+            raise RuntimeError('reseed_runtime_source_promoted|Το runtime source έχει ήδη προωθηθεί στο per-installation target. Το reseed είναι κλειδωμένο.')
         if not PERSISTENT_WORKER_ACTIVE:
             raise RuntimeError('reseed_shared_runtime_not_running|Το shared unattended runtime πρέπει να είναι RUNNING πριν από clean reseed canary.')
         IDENTITY_RESEED_WORKER_ACTIVE=True
@@ -3952,11 +4035,273 @@ def start_candidate_reconnect_canary():
             raise RuntimeError('candidate_reconnect_other_canary_active|Υπάρχει ήδη άλλο Managed canary σε εξέλιξη.')
         if not _candidate_quarantine_exists():
             raise RuntimeError('candidate_reconnect_quarantine_missing|Δεν υπάρχει quarantined candidate identity.')
+        ident=load_identity(); persisted=_validate_persisted_mesh_identity(ident,None) if ident else {'state':'not_paired'}
+        if persisted.get('runtime_source','shared')!='shared':
+            raise RuntimeError('candidate_reconnect_runtime_source_promoted|Το runtime source έχει ήδη προωθηθεί. Το reconnect canary είναι ιστορικό και κλειδωμένο.')
         if not PERSISTENT_WORKER_ACTIVE:
             raise RuntimeError('candidate_reconnect_shared_runtime_not_running|Το shared unattended runtime πρέπει να είναι RUNNING πριν από candidate reconnect verification.')
         CANDIDATE_RECONNECT_WORKER_ACTIVE=True
     t=threading.Thread(target=candidate_reconnect_worker,name='managed-candidate-reconnect-canary',daemon=True)
     t.start()
+
+
+def load_promotion_state():
+    base={
+        'status':'not_run','verified':False,'started_at':0,'ended_at':0,'result_code':'','elapsed_seconds':0,
+        'installation_id':'','node_id':'','client_version':'','architecture':'','target_group_name':'',
+        'expected_agent_label':'','candidate_db_sha256_hint':'','candidate_node_hint':'','candidate_seen_online':False,
+        'shared_runtime_stopped':False,'local_identity_commit':False,'target_runtime_started':False,
+        'rollback_backup_present':False,'rollback_restored':False,'runtime_source':'shared',
+        'old_meshcentral_node_delete':False,'technician_actions_authorized':False,'error_code':'','error_message':'',
+    }
+    try:
+        if not PROMOTION_STATE_FILE.exists(): return base
+        st=os.lstat(PROMOTION_STATE_FILE)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode) or st.st_size<=0 or st.st_size>32768: return base
+        data=json.loads(PROMOTION_STATE_FILE.read_text(encoding='utf-8'))
+        if isinstance(data,dict): base.update(data)
+    except (OSError,UnicodeError,json.JSONDecodeError): pass
+    return base
+
+
+def save_promotion_state(state):
+    allowed=set(load_promotion_state().keys())
+    payload={k:state.get(k) for k in allowed if k in state}; payload['schema_version']=1; payload['updated_at']=now_ts()
+    DATA_DIR.mkdir(parents=True,exist_ok=True)
+    tmp=PROMOTION_STATE_FILE.with_suffix('.tmp')
+    fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+    try:
+        with os.fdopen(fd,'w',encoding='utf-8') as h:
+            json.dump(payload,h,ensure_ascii=False,separators=(',',':')); h.flush(); os.fsync(h.fileno())
+        os.replace(tmp,PROMOTION_STATE_FILE); os.chmod(PROMOTION_STATE_FILE,0o600)
+    finally:
+        try:
+            if tmp.exists(): tmp.unlink()
+        except OSError: pass
+
+
+def _promotion_report(identity,report_token,result_code,elapsed,candidate_hint,rollback_restored=False):
+    try:
+        return broker_post('/managed/group-migration/promotion/report',{
+            'report_token':report_token,'node_id':identity['node_id'],'node_secret':identity['node_secret'],
+            'result_code':result_code,'elapsed_seconds':max(0,min(180,int(elapsed))),
+            'candidate_db_sha256_hint':candidate_hint,'rollback_restored':bool(rollback_restored)})
+    except RuntimeError:
+        return {}
+
+
+def _write_promoted_identity_stage(identity,target_material,candidate,stable):
+    if MESH_ROLLBACK_DIR.exists() or MESH_ROLLBACK_DIR.is_symlink():
+        raise RuntimeError('promotion_rollback_already_exists|Υπάρχει ήδη rollback identity. Δεν επιτρέπεται δεύτερο promotion.')
+    stage=DATA_DIR / ('.meshagent-identity-promote-'+secrets.token_hex(6))
+    stage.mkdir(mode=0o700); os.chmod(stage,0o700)
+    try:
+        db_target=stage/'meshagent.db'
+        fd,size=_open_regular_nofollow(MESH_CANDIDATE_DB_FILE,MAX_MESH_IDENTITY_DB_BYTES)
+        try:
+            outfd=os.open(db_target,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+            try:
+                total=0; digest=hashlib.sha256()
+                while True:
+                    chunk=os.read(fd,65536)
+                    if not chunk: break
+                    total+=len(chunk)
+                    if total>MAX_MESH_IDENTITY_DB_BYTES: raise RuntimeError('promotion_candidate_db_size|Η candidate DB ξεπέρασε το ασφαλές όριο.')
+                    view=memoryview(chunk)
+                    while view:
+                        written=os.write(outfd,view)
+                        if written<=0: raise RuntimeError('promotion_candidate_copy_write|Απέτυχε η ασφαλής αντιγραφή της candidate DB.')
+                        view=view[written:]
+                    digest.update(chunk)
+                os.fsync(outfd)
+            finally: os.close(outfd)
+        finally: os.close(fd)
+        if total!=size or not secrets.compare_digest(digest.hexdigest(),candidate['db_sha256']):
+            raise RuntimeError('promotion_candidate_copy_mismatch|Η candidate DB απέτυχε στον έλεγχο ακεραιότητας πριν από commit.')
+        binding_sha=_mesh_identity_binding_hash(identity,target_material)
+        meta={
+            'schema_version':1,'installation_id':identity['installation_id'],'broker_node_id':identity['node_id'],'architecture':ARCH,
+            'agent_label':candidate['agent_label'],'binding_sha256':binding_sha,'db_sha256':candidate['db_sha256'],
+            'db_bytes':candidate['db_bytes'],'runtime_relative_path':'meshagent.db','seeded_at':_as_int(candidate['meta'].get('seeded_at')) or now_ts(),
+            'updated_at':now_ts(),'generation':max(1,_as_int(stable.get('generation')) or 1)+1,'continuity_runs':0,
+            'runtime_source':'target','target_group_name':candidate['target_group_name'],
+            'target_mesh_id_hint':_safe_str(target_material.get('target_mesh_id_hint'),20),
+            'target_binding_hint':_safe_str(target_material.get('target_binding_hint'),20),
+            'target_source_fingerprint_hint':_safe_str(target_material.get('target_source_fingerprint_hint'),20),
+            'shared_source_fingerprint_hint':_safe_str(target_material.get('shared_source_fingerprint_hint'),20),
+            'promotion_state':'promoted_pending_qa','promoted_at':now_ts(),'old_identity_db_sha256':stable.get('db_sha256',''),
+            'service_persistence':False,'technician_actions_authorized':False,
+        }
+        m=stage/'identity-meta.json'; fd=os.open(m,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+        with os.fdopen(fd,'w',encoding='utf-8') as h:
+            json.dump(meta,h,ensure_ascii=False,separators=(',',':')); h.flush(); os.fsync(h.fileno())
+        try:
+            dfd=os.open(stage,os.O_RDONLY); os.fsync(dfd); os.close(dfd)
+        except OSError: pass
+        return stage
+    except Exception:
+        try: shutil.rmtree(stage)
+        except OSError: pass
+        raise
+
+
+def _activate_promoted_identity(stage):
+    if not MESH_IDENTITY_DIR.exists() or MESH_IDENTITY_DIR.is_symlink():
+        raise RuntimeError('promotion_stable_identity_missing|Η current stable identity δεν είναι διαθέσιμη για rollback rename.')
+    if MESH_ROLLBACK_DIR.exists() or MESH_ROLLBACK_DIR.is_symlink():
+        raise RuntimeError('promotion_rollback_already_exists|Υπάρχει ήδη rollback identity.')
+    os.rename(MESH_IDENTITY_DIR,MESH_ROLLBACK_DIR)
+    try:
+        os.rename(stage,MESH_IDENTITY_DIR)
+    except Exception:
+        os.rename(MESH_ROLLBACK_DIR,MESH_IDENTITY_DIR)
+        raise
+    try:
+        dfd=os.open(DATA_DIR,os.O_RDONLY); os.fsync(dfd); os.close(dfd)
+    except OSError: pass
+
+
+def _restore_shared_identity_from_rollback():
+    if not MESH_ROLLBACK_DIR.exists() or MESH_ROLLBACK_DIR.is_symlink():
+        raise RuntimeError('promotion_rollback_missing|Δεν υπάρχει ασφαλές shared rollback identity.')
+    if MESH_IDENTITY_DIR.exists() or MESH_IDENTITY_DIR.is_symlink():
+        shutil.rmtree(MESH_IDENTITY_DIR)
+    os.rename(MESH_ROLLBACK_DIR,MESH_IDENTITY_DIR)
+    try:
+        dfd=os.open(DATA_DIR,os.O_RDONLY); os.fsync(dfd); os.close(dfd)
+    except OSError: pass
+
+
+def candidate_promotion_worker():
+    global PROMOTION_WORKER_ACTIVE
+    identity=load_identity(); started=now_ts(); report_token=''; stage=None; committed=False; rollback_restored=False
+    candidate=None; target_material=None; candidate_seen_online=False; shared_stopped=False; target_started=False
+    try:
+        if identity is None: raise RuntimeError('promotion_not_paired|Απαιτείται ενεργή Managed identity.')
+        proof=load_candidate_reconnect_state()
+        if proof.get('verified') is not True or proof.get('candidate_seen_online') is not True:
+            raise RuntimeError('promotion_reconnect_proof_required|Απαιτείται VERIFIED candidate reconnect proof πριν από permanent promotion.')
+        if not read_policy().get('allowed_local'): raise RuntimeError('promotion_local_policy_denied|Η τοπική πολιτική δεν επιτρέπει promotion.')
+        server=get_server_state()
+        if server.get('authorized_server') is not True or (_as_int(server.get('valid_until')) or 0)<=now_ts()+100:
+            raise RuntimeError('promotion_server_authorization_required|Απαιτείται φρέσκια Broker authorization πριν από promotion.')
+        target_state,target_material=verify_group_migration_target_settings(return_material=True)
+        candidate=_validate_candidate_quarantine_for_reconnect(identity,target_material)
+        if not secrets.compare_digest(_safe_str(proof.get('candidate_db_sha256_hint'),20),candidate['db_sha256_hint']):
+            raise RuntimeError('promotion_candidate_proof_mismatch|Το reconnect proof δεν αντιστοιχεί στην quarantined candidate.')
+        stable=_validate_persisted_mesh_identity(identity,None)
+        if stable.get('state')!='ready' or stable.get('runtime_source','shared')!='shared':
+            raise RuntimeError('promotion_shared_identity_required|Το current stable runtime source πρέπει να είναι shared πριν από promotion.')
+        if not PERSISTENT_WORKER_ACTIVE: raise RuntimeError('promotion_shared_runtime_not_running|Το shared unattended runtime πρέπει να είναι RUNNING.')
+        save_promotion_state({'status':'preparing','verified':False,'started_at':started,'installation_id':identity['installation_id'],
+            'node_id':identity['node_id'],'client_version':VERSION,'architecture':ARCH,'target_group_name':candidate['target_group_name'],
+            'expected_agent_label':candidate['agent_label'],'candidate_db_sha256_hint':candidate['db_sha256_hint'],
+            'rollback_backup_present':False,'runtime_source':'shared','old_meshcentral_node_delete':False,'technician_actions_authorized':False})
+        common={'node_id':identity['node_id'],'node_secret':identity['node_secret'],'client_version':VERSION,'architecture':ARCH,
+                'candidate_db_sha256_hint':candidate['db_sha256_hint']}
+        auth=broker_post('/managed/group-migration/promotion/request',common)
+        ticket=_safe_str(auth.get('promotion_ticket'),100); report_token=_safe_str(auth.get('report_token'),100)
+        if not (auth.get('success') is True and auth.get('phase')=='candidate_promotion_request'
+                and auth.get('contract_id')=='smart-pro-managed-candidate-promotion-v1' and _as_int(auth.get('schema_version'))==1
+                and PROMOTION_TICKET_RE.fullmatch(ticket) and PROMOTION_REPORT_RE.fullmatch(report_token)
+                and auth.get('rollback_identity_required') is True and auth.get('candidate_identity_commit_authorized') is True
+                and auth.get('target_runtime_source_commit_authorized') is True and auth.get('old_meshcentral_node_delete') is False
+                and auth.get('technician_actions_authorized') is False):
+            raise RuntimeError('promotion_authorization_invalid|Ο Broker δεν επέστρεψε έγκυρο promotion contract.')
+        PERSISTENT_STOP_EVENT.set(); deadline=time.monotonic()+PROMOTION_SHARED_STOP_TIMEOUT
+        while PERSISTENT_WORKER_ACTIVE and time.monotonic()<deadline: time.sleep(.25)
+        if PERSISTENT_WORKER_ACTIVE: raise RuntimeError('promotion_shared_stop_failed|Το shared runtime δεν τερματίστηκε εγκαίρως.')
+        shared_stopped=True
+        consume=dict(common); consume['promotion_ticket']=ticket
+        run=broker_post('/managed/group-migration/promotion/consume',consume); ticket=''
+        if not (run.get('success') is True and run.get('phase')=='candidate_promotion_consume'
+                and run.get('contract_id')=='smart-pro-managed-candidate-promotion-v1'
+                and run.get('candidate_identity_commit_authorized') is True and run.get('target_runtime_source_commit_authorized') is True
+                and run.get('rollback_identity_required') is True and run.get('old_meshcentral_node_delete') is False):
+            raise RuntimeError('promotion_consume_invalid|Το promotion authorization δεν καταναλώθηκε σωστά.')
+        max_runtime=min(PROMOTION_START_VERIFY_TIMEOUT,_as_int(run.get('max_runtime_seconds')) or PROMOTION_START_VERIFY_TIMEOUT)
+        stage=_write_promoted_identity_stage(identity,target_material,candidate,stable)
+        _activate_promoted_identity(stage); stage=None; committed=True
+        save_promotion_state({'status':'committed_pending_online','verified':False,'started_at':started,'installation_id':identity['installation_id'],
+            'node_id':identity['node_id'],'client_version':VERSION,'architecture':ARCH,'target_group_name':candidate['target_group_name'],
+            'expected_agent_label':candidate['agent_label'],'candidate_db_sha256_hint':candidate['db_sha256_hint'],
+            'shared_runtime_stopped':True,'local_identity_commit':True,'rollback_backup_present':True,'runtime_source':'target',
+            'old_meshcentral_node_delete':False,'technician_actions_authorized':False})
+        PERSISTENT_STOP_EVENT.clear(); start_persistent_runtime(); target_started=True
+        wait_end=time.monotonic()+max_runtime
+        verified_polls=0
+        while time.monotonic()<wait_end:
+            ps=load_persistent_state()
+            if ps.get('status')=='failed': raise RuntimeError('promotion_target_runtime_failed|Το promoted target runtime απέτυχε πριν από verification.')
+            watch=broker_post('/managed/group-migration/promotion/watch',{'report_token':report_token,'node_id':identity['node_id'],'node_secret':identity['node_secret']})
+            candidate_seen_online=candidate_seen_online or watch.get('candidate_seen_online') is True
+            if watch.get('continue') is not True and _safe_str(watch.get('reason'),100)!='promotion_runtime_limit':
+                raise RuntimeError('promotion_server_watch_denied|Ο Broker σταμάτησε το promotion verification.')
+            if ps.get('status')=='running' and ps.get('runtime_source')=='target' and candidate_seen_online:
+                verified_polls+=1
+                if verified_polls>=3: break
+            else:
+                verified_polls=0
+            time.sleep(3)
+        else:
+            raise RuntimeError('promotion_candidate_not_seen|Δεν επαληθεύτηκε έγκαιρα το promoted candidate node online.')
+        elapsed=max(0,now_ts()-started)
+        rep=_promotion_report(identity,report_token,'promoted_pending_qa',elapsed,candidate['db_sha256_hint'],False); report_token=''
+        verified=rep.get('success') is True and rep.get('verified') is True
+        if not verified: raise RuntimeError('promotion_report_not_verified|Ο Broker δεν επιβεβαίωσε το promotion report.')
+        save_promotion_state({'status':'promoted_pending_qa','verified':True,'started_at':started,'ended_at':now_ts(),'result_code':'promoted_pending_qa',
+            'elapsed_seconds':elapsed,'installation_id':identity['installation_id'],'node_id':identity['node_id'],'client_version':VERSION,'architecture':ARCH,
+            'target_group_name':candidate['target_group_name'],'expected_agent_label':candidate['agent_label'],'candidate_db_sha256_hint':candidate['db_sha256_hint'],
+            'candidate_node_hint':_safe_str(rep.get('candidate_node_hint'),20),'candidate_seen_online':True,'shared_runtime_stopped':True,
+            'local_identity_commit':True,'target_runtime_started':True,'rollback_backup_present':True,'rollback_restored':False,'runtime_source':'target',
+            'old_meshcentral_node_delete':False,'technician_actions_authorized':False})
+        print(f"[managed] candidate promotion VERIFIED pending QA for {identity['installation_id']} candidate_db_hint={candidate['db_sha256_hint']} runtime_source=target rollback_backup=true old_node_delete=false technician_actions=false",flush=True)
+    except (RuntimeError,OSError,subprocess.SubprocessError) as exc:
+        text=str(exc); code,_,message=text.partition('|'); code=code or 'promotion_failed'
+        if committed:
+            try:
+                if PERSISTENT_WORKER_ACTIVE:
+                    stop_persistent_runtime(); deadline=time.monotonic()+PROMOTION_SHARED_STOP_TIMEOUT
+                    while PERSISTENT_WORKER_ACTIVE and time.monotonic()<deadline: time.sleep(.25)
+                _restore_shared_identity_from_rollback(); rollback_restored=True; committed=False
+                PERSISTENT_STOP_EVENT.clear()
+                if load_unattended_control().get('enabled') and read_policy().get('allowed_local') and get_server_state().get('authorized_server') is True:
+                    start_persistent_runtime()
+            except Exception:
+                rollback_restored=False
+        elapsed=max(0,now_ts()-started)
+        if report_token and identity is not None and candidate is not None:
+            _promotion_report(identity,report_token,'rollback_restored' if rollback_restored else 'commit_failed',elapsed,candidate.get('db_sha256_hint',''),rollback_restored); report_token=''
+        save_promotion_state({'status':'rollback_restored' if rollback_restored else 'failed','verified':False,'started_at':started,'ended_at':now_ts(),
+            'result_code':code,'elapsed_seconds':elapsed,'installation_id':(identity or {}).get('installation_id',''),'node_id':(identity or {}).get('node_id',''),
+            'client_version':VERSION,'architecture':ARCH,'target_group_name':(candidate or {}).get('target_group_name',''),
+            'expected_agent_label':(candidate or {}).get('agent_label',''),'candidate_db_sha256_hint':(candidate or {}).get('db_sha256_hint',''),
+            'candidate_seen_online':candidate_seen_online,'shared_runtime_stopped':shared_stopped,'local_identity_commit':committed,
+            'target_runtime_started':target_started,'rollback_backup_present':MESH_ROLLBACK_DIR.exists(),'rollback_restored':rollback_restored,
+            'runtime_source':'shared' if rollback_restored else ('target' if committed else 'shared'),'old_meshcentral_node_delete':False,
+            'technician_actions_authorized':False,'error_code':_safe_str(code,100),'error_message':_safe_str(message or text,300)})
+        print(f"[managed] candidate promotion failed code={code}; rollback_restored={str(rollback_restored).lower()} old_node_delete=false technician_actions=false",flush=True)
+    finally:
+        if stage:
+            try: shutil.rmtree(stage)
+            except OSError: pass
+        if target_material is not None:
+            try: target_material['raw']=b''
+            except Exception: pass
+        with PROMOTION_WORKER_LOCK: PROMOTION_WORKER_ACTIVE=False
+
+
+def start_candidate_promotion():
+    global PROMOTION_WORKER_ACTIVE
+    with PROMOTION_WORKER_LOCK:
+        if PROMOTION_WORKER_ACTIVE: raise RuntimeError('promotion_already_running|Υπάρχει ήδη promotion σε εξέλιξη.')
+        if IDENTITY_RESEED_WORKER_ACTIVE or MIGRATION_CANARY_WORKER_ACTIVE or CANDIDATE_RECONNECT_WORKER_ACTIVE or CANARY_WORKER_ACTIVE:
+            raise RuntimeError('promotion_other_canary_active|Υπάρχει ήδη άλλο Managed canary σε εξέλιξη.')
+        if not _candidate_quarantine_exists(): raise RuntimeError('promotion_candidate_missing|Δεν υπάρχει quarantined candidate identity.')
+        if MESH_ROLLBACK_DIR.exists() or MESH_ROLLBACK_DIR.is_symlink(): raise RuntimeError('promotion_rollback_already_exists|Υπάρχει ήδη rollback identity.')
+        if not PERSISTENT_WORKER_ACTIVE: raise RuntimeError('promotion_shared_runtime_not_running|Το shared unattended runtime πρέπει να είναι RUNNING.')
+        PROMOTION_WORKER_ACTIVE=True
+    threading.Thread(target=candidate_promotion_worker,name='managed-candidate-promotion',daemon=True).start()
 
 def heartbeat_worker():
     last_summary = None
@@ -4060,6 +4405,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
     migration_canary_html = ""
     identity_reseed_html = ""
     candidate_reconnect_html = ""
+    promotion_html = ""
     if identity is not None:
         enrollment_verified = (
             enrollment.get("verified") is True
@@ -4512,7 +4858,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         rrollbackstart = 'ΝΑΙ' if rcurrent and identity_reseed_state.get('rollback_shared_runtime_started') else 'ΟΧΙ'
         rcleanup = 'ΝΑΙ' if rcurrent and identity_reseed_state.get('runtime_directory_deleted') else 'ΟΧΙ'
         rexisting = 'ΝΑΙ' if (not rcurrent or identity_reseed_state.get('existing_identity_preserved') is not False) else 'ΟΧΙ'
-        rdisabled = ' disabled' if (not overall or IDENTITY_RESEED_WORKER_ACTIVE or not PERSISTENT_WORKER_ACTIVE or candidate_exists) else ''
+        rdisabled = ' disabled' if (not overall or IDENTITY_RESEED_WORKER_ACTIVE or not PERSISTENT_WORKER_ACTIVE or candidate_exists or mesh_identity_status.get('runtime_source','shared')!='shared') else ''
         identity_reseed_html = f"""
 <section class="pairbox">
 <h2>Clean per-installation identity reseed canary</h2>
@@ -4570,7 +4916,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         crcleanup = 'ΝΑΙ' if crcurrent and candidate_reconnect_state.get('runtime_directory_deleted') else 'ΟΧΙ'
         crresult = candidate_reconnect_state.get('result_code') if crcurrent else '—'
         crelapsed = str(candidate_reconnect_state.get('elapsed_seconds') or '—') if crcurrent else '—'
-        crdisabled = ' disabled' if (not overall or CANDIDATE_RECONNECT_WORKER_ACTIVE or not PERSISTENT_WORKER_ACTIVE or not candidate_exists) else ''
+        crdisabled = ' disabled' if (not overall or CANDIDATE_RECONNECT_WORKER_ACTIVE or not PERSISTENT_WORKER_ACTIVE or not candidate_exists or mesh_identity_status.get('runtime_source','shared')!='shared') else ''
         candidate_reconnect_html = f"""
 <section class="pairbox">
 <h2>Quarantined candidate reconnect verification</h2>
@@ -4600,13 +4946,52 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </form>
 </section>"""
 
+        promotion_state=load_promotion_state()
+        pcur=(promotion_state.get('installation_id')==identity['installation_id'] and promotion_state.get('node_id')==identity['node_id'])
+        pstat=promotion_state.get('status') if pcur else 'not_run'
+        if pstat=='promoted_pending_qa' and promotion_state.get('verified') is True: promo_label='VERIFIED — TARGET PROMOTED / POST-PROMOTION QA REQUIRED'
+        elif pstat=='rollback_restored': promo_label='ROLLBACK RESTORED — SHARED SOURCE ACTIVE'
+        elif pstat in {'preparing','committed_pending_online'}: promo_label='RUNNING — ΜΗΝ ΚΛΕΙΣΕΤΕ ΤΟ ADD-ON'
+        elif pstat=='failed': promo_label='FAILED — '+(promotion_state.get('error_message') or promotion_state.get('result_code') or 'ελέγξτε logs')
+        else: promo_label='Δεν έχει εκτελεστεί ακόμη'
+        proof=load_candidate_reconnect_state(); reconnect_ok=proof.get('verified') is True and proof.get('candidate_seen_online') is True
+        current_identity=_validate_persisted_mesh_identity(identity,None)
+        runtime_source=_safe_str(current_identity.get('runtime_source') or 'shared',20).lower()
+        promo_disabled=' disabled' if (not overall or PROMOTION_WORKER_ACTIVE or not PERSISTENT_WORKER_ACTIVE or not candidate_exists or not reconnect_ok or runtime_source!='shared' or MESH_ROLLBACK_DIR.exists()) else ''
+        promo_group=promotion_state.get('target_group_name') if pcur else f"Smart Pro Managed — {identity['installation_id']}"
+        promo_db=promotion_state.get('candidate_db_sha256_hint') if pcur and promotion_state.get('candidate_db_sha256_hint') else crdbhint
+        promo_node=promotion_state.get('candidate_node_hint') if pcur and promotion_state.get('candidate_node_hint') else crnodehint
+        promotion_html=f"""
+<section class="pairbox">
+<h2>Permanent candidate promotion</h2>
+<p>Προωθεί την ήδη VERIFIED quarantined candidate ως νέα stable identity και αλλάζει το unattended runtime source στο <strong>{esc(promo_group)}</strong>. Πριν από το commit δημιουργείται υποχρεωτικά local rollback identity. Ο Broker 0.42.0+ παρακολουθεί read-only ότι γίνεται online το ίδιο bound candidate node. <strong>Δεν διαγράφεται ο παλιός MeshCentral node και δεν ενεργοποιείται technician access.</strong></p>
+<div class="mini-grid">
+<div><span>Κατάσταση</span><strong>{esc(promo_label)}</strong></div>
+<div><span>Current runtime source</span><strong>{esc(runtime_source.upper())}</strong></div>
+<div><span>Target group</span><strong>{esc(promo_group)}</strong></div>
+<div><span>Candidate DB hint</span><strong>{esc(promo_db)}</strong></div>
+<div><span>Candidate node hint</span><strong>{esc(promo_node)}</strong></div>
+<div><span>Reconnect proof</span><strong>{'ΝΑΙ' if reconnect_ok else 'ΟΧΙ'}</strong></div>
+<div><span>Local identity commit</span><strong>{'ΝΑΙ' if pcur and promotion_state.get('local_identity_commit') else 'ΟΧΙ'}</strong></div>
+<div><span>Rollback backup present</span><strong>{'ΝΑΙ' if MESH_ROLLBACK_DIR.exists() else 'ΟΧΙ'}</strong></div>
+<div><span>Target runtime started</span><strong>{'ΝΑΙ' if pcur and promotion_state.get('target_runtime_started') else 'ΟΧΙ'}</strong></div>
+<div><span>Candidate seen online</span><strong>{'ΝΑΙ' if pcur and promotion_state.get('candidate_seen_online') else 'ΟΧΙ'}</strong></div>
+<div><span>Old MeshCentral node delete</span><strong>ΟΧΙ</strong></div>
+<div><span>Technician actions</span><strong>NOT AUTHORIZED</strong></div>
+</div>
+<form method="post" action="candidate-promotion">
+<input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
+<button type="submit"{promo_disabled}>Έναρξη permanent promotion</button>
+</form>
+</section>"""
+
     return f"""<!doctype html>
 <html lang="el"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Smart Pro Managed Support</title>
 <style>
 :root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;background:#10151d;color:#eef5ff;font:14px/1.5 Arial,Helvetica,sans-serif}}main{{max-width:1000px;margin:0 auto;padding:24px}}.hero{{background:#172231;border:1px solid #2c4158;border-radius:16px;padding:22px;margin-bottom:16px}}h1{{margin:0 0 5px;font-size:27px}}h2{{margin:0 0 10px;font-size:18px}}.sub{{color:#aab9ca}}.badge{{display:inline-block;margin-top:14px;padding:8px 12px;border-radius:999px;font-weight:700}}.ok{{background:#173a2a;color:#9ff0bd;border:1px solid #2c7750}}.bad{{background:#442128;color:#ffb5c0;border:1px solid #8c3d4d}}.warn{{background:#43381a;color:#ffe49a;border:1px solid #8b7331}}.note{{margin-top:15px;padding:13px 15px;border-radius:10px;background:#12293a;border:1px solid #245473;color:#cfeeff}}.notice{{margin:0 0 16px;padding:12px 14px;border-radius:10px}}.notice-ok{{background:#173a2a;border:1px solid #2c7750;color:#bdf7d0}}.notice-bad{{background:#442128;border:1px solid #8c3d4d;color:#ffd0d6}}.notice-info{{background:#12293a;border:1px solid #245473;color:#cfeeff}}.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.card,.pairbox{{background:#171d26;border:1px solid #293646;border-radius:12px;padding:15px}}.k{{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:#8fa1b5}}.v{{font-size:15px;font-weight:700;margin-top:4px;overflow-wrap:anywhere}}.pairbox{{margin:16px 0}}.pairbox p{{color:#b7c5d5}}label{{display:block;font-weight:700;margin:12px 0 6px}}input{{width:100%;max-width:460px;padding:11px 12px;border-radius:8px;border:1px solid #3b4c60;background:#0f151d;color:#fff;font:inherit}}button{{display:block;margin-top:12px;border:0;border-radius:8px;padding:10px 14px;background:#19aee8;color:#06131b;font-weight:800;cursor:pointer}}button:disabled,input:disabled{{opacity:.5;cursor:not-allowed}}code{{color:#9fdfff}}.mini-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.mini-grid div{{background:#111821;border:1px solid #28384a;border-radius:9px;padding:10px}}.mini-grid span{{display:block;color:#8fa1b5;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}}.mini-grid strong{{overflow-wrap:anywhere}}.footer{{margin-top:18px;color:#7f91a6;font-size:12px}}@media(max-width:650px){{main{{padding:14px}}.grid,.mini-grid{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.14.0 · Quarantined Candidate Reconnect Verification Consumer · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
+<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.15.0 · Permanent Candidate Promotion Consumer · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
 {notice_html}
 {pair_html}
 {enrollment_html}
@@ -4620,6 +5005,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 {migration_canary_html}
 {identity_reseed_html}
 {candidate_reconnect_html}
+{promotion_html}
 <section class="grid">
 <div class="card"><div class="k">Installation ID</div><div class="v">{esc(policy.get('installation_id') or (identity or {}).get('installation_id'))}</div></div>
 <div class="card"><div class="k">Smart Pro Tools</div><div class="v">v{esc((policy.get('source') or {}).get('addon_version'))} · Online: {esc(tools_online)}</div></div>
@@ -4635,12 +5021,12 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <div class="card"><div class="k">MeshCentral stable identity</div><div class="v">{esc(mesh_identity_label)} · generation {esc(mesh_identity_generation)} · runs {esc(mesh_identity_runs)} · DB {esc(mesh_identity_db_hint)} · {esc(mesh_identity_updated)}</div></div>
 <div class="card"><div class="k">Remote access</div><div class="v">Όχι — το node μπορεί να είναι online, αλλά web/Terminal/Files technician actions παραμένουν NOT AUTHORIZED</div></div>
 </section>
-<div class="footer">3.14.0 candidate reconnect verification. Η υπάρχουσα stable identity και η quarantined candidate παραμένουν ανέγγιχτες. Η candidate DB επαναχρησιμοποιείται μόνο σε ≤45s foreground verification ώστε ο Broker να αποδείξει read-only ότι επανέρχεται το ίδιο exact bound candidate node. Δεν γίνεται permanent source/binding commit, old-node delete ή technician authorization.</div>
+<div class="footer">3.15.0 permanent candidate promotion. Η VERIFIED quarantined candidate μπορεί να γίνει η νέα stable identity και το per-installation target το νέο unattended runtime source, με υποχρεωτικό local rollback backup και read-only Broker verification του exact bound candidate node. Ο παλιός MeshCentral node δεν διαγράφεται και technician authorization παραμένει κλειδωμένο μέχρι να ολοκληρωθεί post-promotion QA.</div>
 </main></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SmartProManaged/3.14.0"
+    server_version = "SmartProManaged/3.15.0"
 
     def _send(self, code, body, content_type):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
@@ -4730,7 +5116,8 @@ class Handler(BaseHTTPRequestHandler):
         is_group_migration_canary = path.endswith("/group-migration-canary") or path == "group-migration-canary"
         is_group_identity_reseed_canary = path.endswith("/group-identity-reseed-canary") or path == "group-identity-reseed-canary"
         is_candidate_reconnect_canary = path.endswith("/candidate-reconnect-canary") or path == "candidate-reconnect-canary"
-        if not is_pair and not is_enrollment and not is_settings and not is_agent and not is_runtime and not is_canary and not is_persistent_start and not is_persistent_stop and not is_group_migration_preflight and not is_group_migration_target_settings and not is_group_migration_canary and not is_group_identity_reseed_canary and not is_candidate_reconnect_canary:
+        is_candidate_promotion = path.endswith("/candidate-promotion") or path == "candidate-promotion"
+        if not is_pair and not is_enrollment and not is_settings and not is_agent and not is_runtime and not is_canary and not is_persistent_start and not is_persistent_stop and not is_group_migration_preflight and not is_group_migration_target_settings and not is_group_migration_canary and not is_group_identity_reseed_canary and not is_candidate_reconnect_canary and not is_candidate_promotion:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
         length = _as_int(self.headers.get("Content-Length")) or 0
@@ -4746,7 +5133,7 @@ class Handler(BaseHTTPRequestHandler):
         if not secrets.compare_digest(csrf, CSRF_TOKEN):
             self._send(403, render_page(read_policy(), "Η φόρμα ενεργοποίησης έληξε. Ανανεώστε τη σελίδα.", "bad"), "text/html; charset=utf-8")
             return
-        if PERSISTENT_WORKER_ACTIVE and not (is_persistent_stop or is_group_migration_preflight or is_group_migration_target_settings or is_group_migration_canary or is_group_identity_reseed_canary or is_candidate_reconnect_canary):
+        if PERSISTENT_WORKER_ACTIVE and not (is_persistent_stop or is_group_migration_preflight or is_group_migration_target_settings or is_group_migration_canary or is_group_identity_reseed_canary or is_candidate_reconnect_canary or is_candidate_promotion):
             self._send(409, render_page(read_policy(), "Η continuous Managed λειτουργία είναι ενεργή. Επιτρέπονται μόνο ασφαλής τερματισμός ή οι verification-only migration έλεγχοι.", "bad"), "text/html; charset=utf-8")
             return
         if is_pair:
@@ -4861,6 +5248,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(409,render_page(read_policy(),message,"bad"),"text/html; charset=utf-8")
             return
 
+        if is_candidate_promotion:
+            try:
+                start_candidate_promotion()
+                self._send(202, render_page(read_policy(), "Το permanent promotion ξεκίνησε. Μην κλείσετε το add-on και μην αλλάξετε MeshCentral groups/permissions. Η παλιά shared identity κρατιέται ως local rollback. Κάντε refresh μετά από περίπου 2 λεπτά.", "info"), "text/html; charset=utf-8")
+            except RuntimeError as exc:
+                self._send(409, render_page(read_policy(), str(exc).partition('|')[2] or "Δεν ήταν δυνατή η εκκίνηση του permanent promotion.", "error"), "text/html; charset=utf-8")
+            return
+
         if is_candidate_reconnect_canary:
             try:
                 start_candidate_reconnect_canary()
@@ -4950,7 +5345,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"[managed] Smart Pro Managed Support {VERSION} quarantined candidate reconnect verification consumer listening on {PORT}", flush=True)
+    print(f"[managed] Smart Pro Managed Support {VERSION} permanent candidate promotion consumer listening on {PORT}", flush=True)
     boot_identity = get_mesh_identity_status(load_identity())
     boot_control = load_unattended_control()
     print(f"[managed] mesh identity state={boot_identity.get('state')} generation={boot_identity.get('generation', 0)} continuity_runs={boot_identity.get('continuity_runs', 0)}; unattended_enabled={str(bool(boot_control.get('enabled'))).lower()}", flush=True)
