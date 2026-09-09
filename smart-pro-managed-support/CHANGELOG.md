@@ -1,4 +1,8 @@
-# 3.15.0
+# 3.15.1 — Promotion Verification Window Synchronization Hotfix
+- Waits for the committed TARGET persistent runtime to become locally RUNNING before starting Broker read-only candidate observation.
+- Requires Broker 0.42.1+ armed promotion contract so the external verification window no longer burns while the target runtime is being prepared.
+- Adds bounded non-secret diagnostics when the target runtime is ready and when the exact bound candidate is first observed online.
+- Retains rollback-first promotion semantics, old-node retention and technician lock.
 - Adds permanent promotion of the already verified quarantined candidate.
 - Atomically retains the old shared identity as a local rollback backup.
 - Promoted continuous runtime uses the verified per-installation target source.

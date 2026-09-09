@@ -21,7 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.15.0")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.15.1")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -4216,10 +4216,12 @@ def candidate_promotion_worker():
         run=broker_post('/managed/group-migration/promotion/consume',consume); ticket=''
         if not (run.get('success') is True and run.get('phase')=='candidate_promotion_consume'
                 and run.get('contract_id')=='smart-pro-managed-candidate-promotion-v1'
+                and run.get('state')=='promotion_authorized_armed'
                 and run.get('candidate_identity_commit_authorized') is True and run.get('target_runtime_source_commit_authorized') is True
                 and run.get('rollback_identity_required') is True and run.get('old_meshcentral_node_delete') is False):
             raise RuntimeError('promotion_consume_invalid|Το promotion authorization δεν καταναλώθηκε σωστά.')
-        max_runtime=min(PROMOTION_START_VERIFY_TIMEOUT,_as_int(run.get('max_runtime_seconds')) or PROMOTION_START_VERIFY_TIMEOUT)
+        startup_grace=min(90,max(30,_as_int(run.get('startup_grace_seconds')) or 60))
+        verification_window=min(PROMOTION_START_VERIFY_TIMEOUT,max(30,_as_int(run.get('verification_window_seconds')) or PROMOTION_START_VERIFY_TIMEOUT))
         stage=_write_promoted_identity_stage(identity,target_material,candidate,stable)
         _activate_promoted_identity(stage); stage=None; committed=True
         save_promotion_state({'status':'committed_pending_online','verified':False,'started_at':started,'installation_id':identity['installation_id'],
@@ -4228,22 +4230,44 @@ def candidate_promotion_worker():
             'shared_runtime_stopped':True,'local_identity_commit':True,'rollback_backup_present':True,'runtime_source':'target',
             'old_meshcentral_node_delete':False,'technician_actions_authorized':False})
         PERSISTENT_STOP_EVENT.clear(); start_persistent_runtime(); target_started=True
-        wait_end=time.monotonic()+max_runtime
+        # 3.15.1: do not start the Broker's external candidate-observation window
+        # while the target persistent worker is still refreshing settings/agent/leases.
+        # First wait locally until the promoted TARGET runtime has actually launched.
+        startup_deadline=time.monotonic()+startup_grace
+        while time.monotonic()<startup_deadline:
+            ps=load_persistent_state()
+            if ps.get('status')=='failed':
+                raise RuntimeError('promotion_target_runtime_failed|Το promoted target runtime απέτυχε πριν από verification.')
+            if ps.get('status')=='running' and ps.get('runtime_source')=='target':
+                break
+            time.sleep(.5)
+        else:
+            raise RuntimeError('promotion_target_runtime_start_timeout|Το promoted target runtime δεν έγινε RUNNING μέσα στο startup grace.')
+        print(f"[managed] promotion target runtime locally RUNNING; starting read-only bound-candidate verification window={verification_window}s",flush=True)
+        wait_end=time.monotonic()+verification_window
         verified_polls=0
+        seen_logged=False
         while time.monotonic()<wait_end:
             ps=load_persistent_state()
-            if ps.get('status')=='failed': raise RuntimeError('promotion_target_runtime_failed|Το promoted target runtime απέτυχε πριν από verification.')
+            if ps.get('status')=='failed':
+                raise RuntimeError('promotion_target_runtime_failed|Το promoted target runtime απέτυχε πριν από verification.')
             watch=broker_post('/managed/group-migration/promotion/watch',{'report_token':report_token,'node_id':identity['node_id'],'node_secret':identity['node_secret']})
             candidate_seen_online=candidate_seen_online or watch.get('candidate_seen_online') is True
-            if watch.get('continue') is not True and _safe_str(watch.get('reason'),100)!='promotion_runtime_limit':
-                raise RuntimeError('promotion_server_watch_denied|Ο Broker σταμάτησε το promotion verification.')
+            reason=_safe_str(watch.get('reason'),100)
+            if candidate_seen_online and not seen_logged:
+                print(f"[managed] promotion bound candidate observed online node_hint={_safe_str(watch.get('candidate_node_hint'),20)}; awaiting consecutive verification polls",flush=True)
+                seen_logged=True
+            if watch.get('continue') is not True:
+                if reason=='promotion_runtime_limit':
+                    break
+                raise RuntimeError(f'promotion_server_watch_denied|Ο Broker σταμάτησε το promotion verification ({reason or "unknown"}).')
             if ps.get('status')=='running' and ps.get('runtime_source')=='target' and candidate_seen_online:
                 verified_polls+=1
                 if verified_polls>=3: break
             else:
                 verified_polls=0
             time.sleep(3)
-        else:
+        if verified_polls<3:
             raise RuntimeError('promotion_candidate_not_seen|Δεν επαληθεύτηκε έγκαιρα το promoted candidate node online.')
         elapsed=max(0,now_ts()-started)
         rep=_promotion_report(identity,report_token,'promoted_pending_qa',elapsed,candidate['db_sha256_hint'],False); report_token=''
@@ -4991,7 +5015,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <style>
 :root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;background:#10151d;color:#eef5ff;font:14px/1.5 Arial,Helvetica,sans-serif}}main{{max-width:1000px;margin:0 auto;padding:24px}}.hero{{background:#172231;border:1px solid #2c4158;border-radius:16px;padding:22px;margin-bottom:16px}}h1{{margin:0 0 5px;font-size:27px}}h2{{margin:0 0 10px;font-size:18px}}.sub{{color:#aab9ca}}.badge{{display:inline-block;margin-top:14px;padding:8px 12px;border-radius:999px;font-weight:700}}.ok{{background:#173a2a;color:#9ff0bd;border:1px solid #2c7750}}.bad{{background:#442128;color:#ffb5c0;border:1px solid #8c3d4d}}.warn{{background:#43381a;color:#ffe49a;border:1px solid #8b7331}}.note{{margin-top:15px;padding:13px 15px;border-radius:10px;background:#12293a;border:1px solid #245473;color:#cfeeff}}.notice{{margin:0 0 16px;padding:12px 14px;border-radius:10px}}.notice-ok{{background:#173a2a;border:1px solid #2c7750;color:#bdf7d0}}.notice-bad{{background:#442128;border:1px solid #8c3d4d;color:#ffd0d6}}.notice-info{{background:#12293a;border:1px solid #245473;color:#cfeeff}}.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.card,.pairbox{{background:#171d26;border:1px solid #293646;border-radius:12px;padding:15px}}.k{{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:#8fa1b5}}.v{{font-size:15px;font-weight:700;margin-top:4px;overflow-wrap:anywhere}}.pairbox{{margin:16px 0}}.pairbox p{{color:#b7c5d5}}label{{display:block;font-weight:700;margin:12px 0 6px}}input{{width:100%;max-width:460px;padding:11px 12px;border-radius:8px;border:1px solid #3b4c60;background:#0f151d;color:#fff;font:inherit}}button{{display:block;margin-top:12px;border:0;border-radius:8px;padding:10px 14px;background:#19aee8;color:#06131b;font-weight:800;cursor:pointer}}button:disabled,input:disabled{{opacity:.5;cursor:not-allowed}}code{{color:#9fdfff}}.mini-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.mini-grid div{{background:#111821;border:1px solid #28384a;border-radius:9px;padding:10px}}.mini-grid span{{display:block;color:#8fa1b5;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}}.mini-grid strong{{overflow-wrap:anywhere}}.footer{{margin-top:18px;color:#7f91a6;font-size:12px}}@media(max-width:650px){{main{{padding:14px}}.grid,.mini-grid{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.15.0 · Permanent Candidate Promotion Consumer · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
+<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.15.1 · Permanent Candidate Promotion Consumer · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
 {notice_html}
 {pair_html}
 {enrollment_html}
@@ -5021,12 +5045,12 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <div class="card"><div class="k">MeshCentral stable identity</div><div class="v">{esc(mesh_identity_label)} · generation {esc(mesh_identity_generation)} · runs {esc(mesh_identity_runs)} · DB {esc(mesh_identity_db_hint)} · {esc(mesh_identity_updated)}</div></div>
 <div class="card"><div class="k">Remote access</div><div class="v">Όχι — το node μπορεί να είναι online, αλλά web/Terminal/Files technician actions παραμένουν NOT AUTHORIZED</div></div>
 </section>
-<div class="footer">3.15.0 permanent candidate promotion. Η VERIFIED quarantined candidate μπορεί να γίνει η νέα stable identity και το per-installation target το νέο unattended runtime source, με υποχρεωτικό local rollback backup και read-only Broker verification του exact bound candidate node. Ο παλιός MeshCentral node δεν διαγράφεται και technician authorization παραμένει κλειδωμένο μέχρι να ολοκληρωθεί post-promotion QA.</div>
+<div class="footer">3.15.1 permanent candidate promotion. Η VERIFIED quarantined candidate μπορεί να γίνει η νέα stable identity και το per-installation target το νέο unattended runtime source, με υποχρεωτικό local rollback backup και read-only Broker verification του exact bound candidate node. Ο παλιός MeshCentral node δεν διαγράφεται και technician authorization παραμένει κλειδωμένο μέχρι να ολοκληρωθεί post-promotion QA.</div>
 </main></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SmartProManaged/3.15.0"
+    server_version = "SmartProManaged/3.15.1"
 
     def _send(self, code, body, content_type):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
