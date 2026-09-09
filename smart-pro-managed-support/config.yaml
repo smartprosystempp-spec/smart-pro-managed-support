@@ -1,6 +1,6 @@
 name: "Smart Pro Managed Support"
 description: "Reseed Supervisor Lock & Candidate Quarantine Hotfix. Αποτρέπει το unattended runtime από race κατά clean reseed/promotion stages και διατηρεί ορατή την ήδη quarantined candidate μετά το update, χωρίς permanent binding/source commit ή technician actions."
-version: "3.13.1"
+version: "3.14.0"
 slug: "smart_pro_managed_support"
 arch:
   - aarch64

@@ -21,7 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.13.1")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.14.0")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -42,6 +42,7 @@ GROUP_MIGRATION_PREFLIGHT_FILE = DATA_DIR / "group-migration-preflight.json"
 GROUP_MIGRATION_TARGET_SETTINGS_FILE = DATA_DIR / "group-migration-target-settings.json"
 GROUP_MIGRATION_CANARY_FILE = DATA_DIR / "group-migration-canary.json"
 GROUP_IDENTITY_RESEED_FILE = DATA_DIR / "group-identity-reseed-canary.json"
+CANDIDATE_RECONNECT_FILE = DATA_DIR / "candidate-reconnect-verification.json"
 MESH_CANDIDATE_DIR = DATA_DIR / "meshagent-candidate-quarantine"
 MESH_CANDIDATE_DB_FILE = MESH_CANDIDATE_DIR / "meshagent.db"
 MESH_CANDIDATE_META_FILE = MESH_CANDIDATE_DIR / "candidate-meta.json"
@@ -71,6 +72,8 @@ MIGRATION_CANARY_TICKET_RE = re.compile(r"^SPMGC-[A-Za-z0-9_-]{43}$")
 MIGRATION_CANARY_REPORT_RE = re.compile(r"^SPMGR-[A-Za-z0-9_-]{43}$")
 IDENTITY_RESEED_TICKET_RE = re.compile(r"^SPMIR-[A-Za-z0-9_-]{43}$")
 IDENTITY_RESEED_REPORT_RE = re.compile(r"^SPMIRR-[A-Za-z0-9_-]{43}$")
+CANDIDATE_RECONNECT_TICKET_RE = re.compile(r"^SPMCR-[A-Za-z0-9_-]{43}$")
+CANDIDATE_RECONNECT_REPORT_RE = re.compile(r"^SPMCRR-[A-Za-z0-9_-]{43}$")
 AGENT_TICKET_RE = re.compile(r"^SPMA-[A-Za-z0-9_-]{43}$")
 RUNTIME_LEASE_RE = re.compile(r"^SPMRL-[A-Za-z0-9_-]{43}$")
 CANARY_TICKET_RE = re.compile(r"^SPMEC-[A-Za-z0-9_-]{43}$")
@@ -96,6 +99,8 @@ MIGRATION_CANARY_WORKER_LOCK = threading.Lock()
 MIGRATION_CANARY_WORKER_ACTIVE = False
 IDENTITY_RESEED_WORKER_LOCK = threading.Lock()
 IDENTITY_RESEED_WORKER_ACTIVE = False
+CANDIDATE_RECONNECT_WORKER_LOCK = threading.Lock()
+CANDIDATE_RECONNECT_WORKER_ACTIVE = False
 PERSISTENT_RECONNECT_DELAYS = (5, 10, 20, 30, 60)
 PERSISTENT_MAX_CONSECUTIVE_EXITS = 5
 PERSISTENT_WATCH_FAILURE_GRACE = 45
@@ -103,6 +108,8 @@ MIGRATION_CANARY_LOCAL_MAX_RUNTIME = 45
 MIGRATION_CANARY_SHARED_STOP_TIMEOUT = 20
 IDENTITY_RESEED_LOCAL_MAX_RUNTIME = 45
 IDENTITY_RESEED_SHARED_STOP_TIMEOUT = 20
+CANDIDATE_RECONNECT_LOCAL_MAX_RUNTIME = 45
+CANDIDATE_RECONNECT_SHARED_STOP_TIMEOUT = 20
 UNATTENDED_STARTUP_DELAY = 8
 UNATTENDED_STALE_RECOVERY_DELAY = 80
 UNATTENDED_FAILURE_RETRY_DELAY = 90
@@ -2239,7 +2246,7 @@ def unattended_supervisor():
             time.sleep(5); continue
         # Migration/reseed workers own the MeshAgent lifecycle while active.
         # The unattended supervisor must not race them by trying to restart the shared runtime.
-        if MIGRATION_CANARY_WORKER_ACTIVE or IDENTITY_RESEED_WORKER_ACTIVE:
+        if MIGRATION_CANARY_WORKER_ACTIVE or IDENTITY_RESEED_WORKER_ACTIVE or CANDIDATE_RECONNECT_WORKER_ACTIVE:
             time.sleep(2); continue
         if PERSISTENT_WORKER_ACTIVE:
             time.sleep(5); continue
@@ -3583,6 +3590,374 @@ def start_group_identity_reseed_canary():
         IDENTITY_RESEED_WORKER_ACTIVE=True
     t=threading.Thread(target=group_identity_reseed_worker,name='managed-group-identity-reseed-canary',daemon=True); t.start()
 
+
+def load_candidate_reconnect_state():
+    base = {
+        'status':'not_run','verified':False,'started_at':0,'ended_at':0,'result_code':'','elapsed_seconds':0,
+        'installation_id':'','node_id':'','client_version':'','architecture':'','target_group_name':'',
+        'expected_agent_label':'','candidate_db_sha256_hint':'','candidate_node_hint':'','candidate_seen_online':False,
+        'shared_runtime_stopped':False,'candidate_meshagent_execution':False,'existing_stable_identity_preserved':True,
+        'permanent_runtime_source_switch':False,'identity_binding_commit':False,'old_meshcentral_node_delete':False,
+        'rollback_shared_runtime_requested':False,'rollback_shared_runtime_started':False,'runtime_directory_deleted':False,
+        'technician_actions_authorized':False,'error_code':'','error_message':'',
+    }
+    try:
+        if not CANDIDATE_RECONNECT_FILE.exists():
+            return base
+        st = os.lstat(CANDIDATE_RECONNECT_FILE)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode) or st.st_size <= 0 or st.st_size > 32768:
+            return base
+        data = json.loads(CANDIDATE_RECONNECT_FILE.read_text(encoding='utf-8'))
+        if isinstance(data, dict):
+            base.update(data)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        pass
+    return base
+
+
+def save_candidate_reconnect_state(state):
+    allowed=set(load_candidate_reconnect_state().keys())
+    payload={k:state.get(k) for k in allowed if k in state}
+    payload['schema_version']=1
+    payload['updated_at']=now_ts()
+    DATA_DIR.mkdir(parents=True,exist_ok=True)
+    tmp=CANDIDATE_RECONNECT_FILE.with_suffix('.tmp')
+    fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+    try:
+        with os.fdopen(fd,'w',encoding='utf-8') as h:
+            json.dump(payload,h,ensure_ascii=False,separators=(',',':'))
+            h.flush(); os.fsync(h.fileno())
+        os.replace(tmp,CANDIDATE_RECONNECT_FILE); os.chmod(CANDIDATE_RECONNECT_FILE,0o600)
+    finally:
+        try:
+            if tmp.exists(): tmp.unlink()
+        except OSError:
+            pass
+
+
+def _read_candidate_meta_secure():
+    if not MESH_CANDIDATE_META_FILE.exists() or MESH_CANDIDATE_META_FILE.is_symlink():
+        raise RuntimeError('candidate_reconnect_meta_missing|Λείπει το quarantined candidate metadata.')
+    st=os.lstat(MESH_CANDIDATE_META_FILE)
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode) or st.st_size<=0 or st.st_size>32768:
+        raise RuntimeError('candidate_reconnect_meta_invalid|Το quarantined candidate metadata δεν έχει ασφαλή μορφή.')
+    try:
+        data=json.loads(MESH_CANDIDATE_META_FILE.read_text(encoding='utf-8'))
+    except (OSError,UnicodeError,json.JSONDecodeError) as exc:
+        raise RuntimeError('candidate_reconnect_meta_unreadable|Δεν ήταν δυνατή η ασφαλής ανάγνωση του candidate metadata.') from exc
+    if not isinstance(data,dict):
+        raise RuntimeError('candidate_reconnect_meta_invalid|Το candidate metadata δεν έχει έγκυρη μορφή.')
+    return data
+
+
+def _validate_candidate_quarantine_for_reconnect(identity,target_material):
+    if not _candidate_quarantine_exists():
+        raise RuntimeError('candidate_reconnect_quarantine_missing|Δεν υπάρχει quarantined candidate identity.')
+    meta=_read_candidate_meta_secure()
+    if _safe_str(meta.get('status'),40)!='quarantined' or meta.get('active') is not False:
+        raise RuntimeError('candidate_reconnect_quarantine_state|Η candidate δεν βρίσκεται σε ασφαλή quarantined κατάσταση.')
+    if (_safe_str(meta.get('installation_id'),100).upper()!=identity['installation_id']
+            or _safe_str(meta.get('broker_node_id'),64).upper()!=identity['node_id']
+            or _safe_str(meta.get('architecture'),20)!=ARCH):
+        raise RuntimeError('candidate_reconnect_owner_mismatch|Η quarantined candidate ανήκει σε διαφορετική εγκατάσταση/Managed identity.')
+    expected_group=f"Smart Pro Managed — {identity['installation_id']}"
+    if _safe_str(meta.get('target_group_name'),200)!=expected_group or _safe_str(target_material.get('target_group_name'),200)!=expected_group:
+        raise RuntimeError('candidate_reconnect_group_mismatch|Η candidate ή το target .msh δεν αντιστοιχούν στο per-installation group.')
+    expected_label=_safe_str(target_material.get('agent_label'),40).upper()
+    if not AGENT_LABEL_RE.fullmatch(expected_label) or _safe_str(meta.get('agent_label'),40).upper()!=expected_label:
+        raise RuntimeError('candidate_reconnect_label_mismatch|Η quarantined candidate δεν συμφωνεί με το verified target label.')
+    for mk,tk in (
+        ('target_mesh_id_hint','target_mesh_id_hint'),
+        ('target_binding_hint','target_binding_hint'),
+        ('target_source_fingerprint_hint','target_source_fingerprint_hint'),
+        ('shared_source_fingerprint_hint','shared_source_fingerprint_hint'),
+    ):
+        if not secrets.compare_digest(_safe_str(meta.get(mk),40),_safe_str(target_material.get(tk),40)):
+            raise RuntimeError('candidate_reconnect_binding_mismatch|Η quarantined candidate δεν συμφωνεί με το verified target binding.')
+    stable=_validate_persisted_mesh_identity(identity,None)
+    if stable.get('state')!='ready':
+        raise RuntimeError('candidate_reconnect_stable_not_ready|Η υπάρχουσα stable rollback identity δεν είναι READY.')
+    existing_sha=_safe_str(meta.get('existing_identity_db_sha256'),80).lower()
+    if not SHA256_RE.fullmatch(existing_sha) or not secrets.compare_digest(existing_sha,stable.get('db_sha256','')):
+        raise RuntimeError('candidate_reconnect_stable_changed|Η stable rollback identity άλλαξε μετά τη δημιουργία της candidate.')
+    db_sha=_safe_str(meta.get('db_sha256'),80).lower()
+    rel_text=_safe_str(meta.get('runtime_relative_path'),200)
+    rel=Path(rel_text)
+    if not SHA256_RE.fullmatch(db_sha) or not rel_text or rel.is_absolute() or '..' in rel.parts or rel.name!='meshagent.db':
+        raise RuntimeError('candidate_reconnect_meta_binding_invalid|Το candidate metadata δεν περιέχει έγκυρο DB binding.')
+    fd,size=_open_regular_nofollow(MESH_CANDIDATE_DB_FILE,MAX_MESH_IDENTITY_DB_BYTES)
+    try:
+        actual_sha,actual_size=_sha256_fd(fd,MAX_MESH_IDENTITY_DB_BYTES)
+    finally:
+        os.close(fd)
+    if actual_size!=(_as_int(meta.get('db_bytes')) or 0) or not secrets.compare_digest(actual_sha,db_sha):
+        raise RuntimeError('candidate_reconnect_db_integrity|Το quarantined candidate database απέτυχε στον έλεγχο ακεραιότητας.')
+    return {
+        'meta':meta,'stable':stable,'db_sha256':actual_sha,'db_sha256_hint':actual_sha[:12],
+        'db_bytes':actual_size,'runtime_relative_path':rel_text,'target_group_name':expected_group,
+        'agent_label':expected_label,
+    }
+
+
+def _copy_candidate_identity_into_runtime(runtime_dir,candidate):
+    rel=Path(candidate['runtime_relative_path'])
+    target=Path(runtime_dir)/rel
+    target.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+    os.chmod(target.parent,0o700)
+    fd,size=_open_regular_nofollow(MESH_CANDIDATE_DB_FILE,MAX_MESH_IDENTITY_DB_BYTES)
+    tmp=target.with_name(target.name+'.candidate-reconnect.tmp')
+    try:
+        outfd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+        try:
+            total=0; digest=hashlib.sha256()
+            while True:
+                chunk=os.read(fd,65536)
+                if not chunk: break
+                total+=len(chunk)
+                if total>MAX_MESH_IDENTITY_DB_BYTES:
+                    raise RuntimeError('candidate_reconnect_db_size|Η candidate DB ξεπέρασε το ασφαλές όριο.')
+                view=memoryview(chunk)
+                while view:
+                    written=os.write(outfd,view)
+                    if written<=0:
+                        raise RuntimeError('candidate_reconnect_copy_write|Απέτυχε η αντιγραφή της candidate DB στο runtime.')
+                    view=view[written:]
+                digest.update(chunk)
+            os.fsync(outfd)
+        finally:
+            os.close(outfd)
+        if total!=size or not secrets.compare_digest(digest.hexdigest(),candidate['db_sha256']):
+            raise RuntimeError('candidate_reconnect_copy_mismatch|Το runtime αντίγραφο της candidate DB απέτυχε στον έλεγχο ακεραιότητας.')
+        os.replace(tmp,target); os.chmod(target,0o600)
+    finally:
+        os.close(fd)
+        try:
+            if tmp.exists(): tmp.unlink()
+        except OSError: pass
+    return target
+
+
+def _candidate_reconnect_report(identity,report_token,result_code,elapsed,candidate_hint):
+    try:
+        data=broker_post('/managed/group-migration/candidate-reconnect/report',{
+            'report_token':report_token,'node_id':identity['node_id'],'node_secret':identity['node_secret'],
+            'result_code':result_code,'elapsed_seconds':max(0,min(60,int(elapsed))),
+            'candidate_db_sha256_hint':candidate_hint})
+        return data
+    except RuntimeError:
+        return {}
+
+
+def candidate_reconnect_worker():
+    global CANDIDATE_RECONNECT_WORKER_ACTIVE
+    identity=load_identity(); runtime_dir=None; agent_temp=None; proc=None; report_token=''; started=now_ts()
+    cleanup_ok=True; shared_stopped=False; candidate_execution=False; candidate_seen_online=False
+    rollback_requested=False; rollback_started=False; target_material=None; result='launch_failed'; process_started_at=0
+    candidate=None
+    try:
+        if identity is None:
+            raise RuntimeError('candidate_reconnect_not_paired|Απαιτείται ενεργή Managed identity.')
+        if not load_unattended_control().get('enabled'):
+            raise RuntimeError('candidate_reconnect_unattended_disabled|Το unattended Managed runtime πρέπει να είναι ENABLED.')
+        if not read_policy().get('allowed_local'):
+            raise RuntimeError('candidate_reconnect_local_policy_denied|Η τοπική Managed πολιτική δεν επιτρέπει candidate reconnect verification.')
+        server=get_server_state()
+        if server.get('authorized_server') is not True or (_as_int(server.get('valid_until')) or 0)<=now_ts():
+            raise RuntimeError('candidate_reconnect_server_authorization_denied|Απαιτείται ενεργό Broker Server Authorization.')
+
+        target_state,target_material=verify_group_migration_target_settings(return_material=True)
+        if target_state.get('verified') is not True:
+            raise RuntimeError('candidate_reconnect_target_not_verified|Το target .msh δεν είναι VERIFIED.')
+        candidate=_validate_candidate_quarantine_for_reconnect(identity,target_material)
+
+        save_candidate_reconnect_state({
+            'status':'stopping_shared_runtime','verified':False,'started_at':started,
+            'installation_id':identity['installation_id'],'node_id':identity['node_id'],'client_version':VERSION,'architecture':ARCH,
+            'target_group_name':candidate['target_group_name'],'expected_agent_label':candidate['agent_label'],
+            'candidate_db_sha256_hint':candidate['db_sha256_hint'],'shared_runtime_stopped':False,
+            'candidate_meshagent_execution':False,'candidate_seen_online':False,'existing_stable_identity_preserved':True,
+            'permanent_runtime_source_switch':False,'identity_binding_commit':False,'old_meshcentral_node_delete':False,
+            'rollback_shared_runtime_requested':False,'rollback_shared_runtime_started':False,'runtime_directory_deleted':False,
+            'technician_actions_authorized':False})
+
+        # Prepare a verified agent before asking the Broker to arm the reconnect.
+        shared_material=_execution_settings_material(identity)
+        if _safe_str(shared_material.get('agent_label'),40).upper()!=candidate['agent_label']:
+            raise RuntimeError('candidate_reconnect_shared_label_mismatch|Shared και target settings δεν συμφωνούν στο Managed label.')
+        agent=_execution_agent_material(identity,shared_material); agent_temp=agent['path']; shared_material['raw']=b''
+
+        common={'node_id':identity['node_id'],'node_secret':identity['node_secret'],'client_version':VERSION,
+                'architecture':ARCH,'candidate_db_sha256_hint':candidate['db_sha256_hint']}
+        auth=broker_post('/managed/group-migration/candidate-reconnect/request',common)
+        ticket=_safe_str(auth.get('candidate_reconnect_ticket'),100)
+        report_token=_safe_str(auth.get('report_token'),100)
+        max_runtime=min(CANDIDATE_RECONNECT_LOCAL_MAX_RUNTIME,_as_int(auth.get('max_runtime_seconds')) or CANDIDATE_RECONNECT_LOCAL_MAX_RUNTIME)
+        if not (
+            auth.get('success') is True and auth.get('phase')=='candidate_reconnect_request'
+            and auth.get('contract_id')=='smart-pro-managed-candidate-reconnect-v1' and _as_int(auth.get('schema_version'))==1
+            and CANDIDATE_RECONNECT_TICKET_RE.fullmatch(ticket) and CANDIDATE_RECONNECT_REPORT_RE.fullmatch(report_token)
+            and auth.get('candidate_identity_reuse_required') is True and auth.get('candidate_quarantine_required') is True
+            and auth.get('shared_runtime_stop_required') is True and auth.get('permanent_runtime_source_switch') is False
+            and auth.get('identity_binding_commit') is False and auth.get('old_meshcentral_node_delete') is False
+            and auth.get('technician_actions_authorized') is False and auth.get('remote_access') is False
+            and _safe_str(auth.get('target_group_name'),200)==candidate['target_group_name']
+            and _safe_str(auth.get('expected_agent_label'),80).upper()==candidate['agent_label']
+            and secrets.compare_digest(_safe_str(auth.get('candidate_db_sha256_hint'),20),candidate['db_sha256_hint'])
+        ):
+            raise RuntimeError('candidate_reconnect_authorization_invalid|Ο Broker δεν επέστρεψε έγκυρο candidate reconnect contract.')
+
+        PERSISTENT_STOP_EVENT.set()
+        deadline=time.monotonic()+CANDIDATE_RECONNECT_SHARED_STOP_TIMEOUT
+        while PERSISTENT_WORKER_ACTIVE and time.monotonic()<deadline:
+            time.sleep(0.25)
+        if PERSISTENT_WORKER_ACTIVE:
+            raise RuntimeError('candidate_reconnect_shared_stop_failed|Το shared unattended runtime δεν τερματίστηκε εγκαίρως.')
+        shared_stopped=True
+
+        consume=dict(common); consume['candidate_reconnect_ticket']=ticket
+        run=broker_post('/managed/group-migration/candidate-reconnect/consume',consume); ticket=''
+        hard_deadline=_as_int(run.get('hard_deadline')) or 0
+        watch_interval=_as_int(run.get('watch_interval_seconds')) or 5
+        max_runtime=min(CANDIDATE_RECONNECT_LOCAL_MAX_RUNTIME,_as_int(run.get('max_runtime_seconds')) or max_runtime)
+        if not (
+            run.get('success') is True and run.get('phase')=='candidate_reconnect_consume'
+            and run.get('contract_id')=='smart-pro-managed-candidate-reconnect-v1'
+            and run.get('candidate_identity_reuse_required') is True and run.get('shared_runtime_stopped_by_client') is True
+            and run.get('permanent_runtime_source_switch') is False and run.get('identity_binding_commit') is False
+            and run.get('old_meshcentral_node_delete') is False and run.get('technician_actions_authorized') is False
+            and run.get('remote_access') is False and hard_deadline>now_ts()
+        ):
+            raise RuntimeError('candidate_reconnect_consume_invalid|Το candidate reconnect authorization δεν καταναλώθηκε σωστά.')
+
+        runtime_dir=Path(tempfile.mkdtemp(prefix='smart-pro-managed-candidate-reconnect-',dir='/tmp')); os.chmod(runtime_dir,0o700)
+        agent_path=runtime_dir/'meshagent'; shutil.move(agent_temp,agent_path); agent_temp=None; os.chmod(agent_path,0o700)
+        msh_path=runtime_dir/'meshagent.msh'; hardened=_harden_runtime_msh(target_material['raw'],candidate['agent_label'])
+        fd=os.open(msh_path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+        with os.fdopen(fd,'wb') as h:
+            h.write(hardened); h.flush(); os.fsync(h.fileno())
+        _copy_candidate_identity_into_runtime(runtime_dir,candidate)
+        private=runtime_dir/'private'; private.mkdir(mode=0o700)
+        env=os.environ.copy(); env.update({'HOME':str(private),'TMPDIR':str(private),'XDG_CONFIG_HOME':str(private),'XDG_CACHE_HOME':str(private)})
+
+        process_started_at=now_ts()
+        save_candidate_reconnect_state({
+            'status':'running','verified':False,'started_at':process_started_at,
+            'installation_id':identity['installation_id'],'node_id':identity['node_id'],'client_version':VERSION,'architecture':ARCH,
+            'target_group_name':candidate['target_group_name'],'expected_agent_label':candidate['agent_label'],
+            'candidate_db_sha256_hint':candidate['db_sha256_hint'],'shared_runtime_stopped':True,
+            'candidate_meshagent_execution':True,'candidate_seen_online':False,'existing_stable_identity_preserved':True,
+            'permanent_runtime_source_switch':False,'identity_binding_commit':False,'old_meshcentral_node_delete':False,
+            'rollback_shared_runtime_requested':False,'rollback_shared_runtime_started':False,'runtime_directory_deleted':False,
+            'technician_actions_authorized':False})
+
+        proc=subprocess.Popen(['setsid','./meshagent'],cwd=str(runtime_dir),stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=env,close_fds=True)
+        candidate_execution=True
+        run_started=time.monotonic(); result='runtime_limit'
+        hard_stop_mono=run_started+min(max_runtime,max(0,hard_deadline-now_ts()))
+        graceful=max(run_started,hard_stop_mono-CANARY_SHUTDOWN_GRACE)
+        print(f"[managed] quarantined candidate reconnect runtime started for {identity['installation_id']} label={candidate['agent_label']} group={candidate['target_group_name']} candidate_db_hint={candidate['db_sha256_hint']}; permanent_commit=false technician_actions=false",flush=True)
+
+        while True:
+            if proc.poll() is not None:
+                result='agent_exit'; break
+            if time.monotonic()>=graceful or now_ts()>=max(0,hard_deadline-CANARY_SHUTDOWN_GRACE):
+                result='runtime_limit'; break
+            if not read_policy().get('allowed_local'):
+                result='server_authorization_lost'; break
+            watch=broker_post('/managed/group-migration/candidate-reconnect/watch',{
+                'report_token':report_token,'node_id':identity['node_id'],'node_secret':identity['node_secret']})
+            if watch.get('candidate_seen_online') is True:
+                candidate_seen_online=True
+            if watch.get('continue') is not True:
+                reason=_safe_str(watch.get('reason'),100)
+                result='runtime_limit' if reason=='candidate_reconnect_runtime_limit' else 'server_authorization_lost'
+                break
+            time.sleep(min(max(1,min(5,watch_interval)),max(0.2,graceful-time.monotonic())))
+
+        _terminate_process_group_before(proc,hard_stop_mono); proc=None
+        elapsed=max(0,int(time.monotonic()-run_started))
+        report=_candidate_reconnect_report(identity,report_token,result,elapsed,candidate['db_sha256_hint']); report_token=''
+        if report.get('candidate_seen_online') is True:
+            candidate_seen_online=True
+        verified=bool(report.get('success') is True and report.get('reported') is True and report.get('verified') is True
+                      and result=='runtime_limit' and candidate_seen_online)
+
+        save_candidate_reconnect_state({
+            'status':'reported' if verified else 'failed','verified':verified,'started_at':process_started_at,'ended_at':now_ts(),
+            'result_code':result,'elapsed_seconds':elapsed,'installation_id':identity['installation_id'],'node_id':identity['node_id'],
+            'client_version':VERSION,'architecture':ARCH,'target_group_name':candidate['target_group_name'],
+            'expected_agent_label':candidate['agent_label'],'candidate_db_sha256_hint':candidate['db_sha256_hint'],
+            'candidate_node_hint':_safe_str(report.get('candidate_node_hint'),20),'candidate_seen_online':candidate_seen_online,
+            'shared_runtime_stopped':True,'candidate_meshagent_execution':candidate_execution,'existing_stable_identity_preserved':True,
+            'permanent_runtime_source_switch':False,'identity_binding_commit':False,'old_meshcentral_node_delete':False,
+            'rollback_shared_runtime_requested':False,'rollback_shared_runtime_started':False,'runtime_directory_deleted':False,
+            'technician_actions_authorized':False})
+        print(f"[managed] quarantined candidate reconnect runtime stopped result={result} verified={str(verified).lower()} elapsed={elapsed}s candidate_seen_online={str(candidate_seen_online).lower()} candidate_db_hint={candidate['db_sha256_hint']}; permanent_commit=false",flush=True)
+
+    except (RuntimeError,OSError,subprocess.SubprocessError) as exc:
+        if proc is not None:
+            _terminate_process_group(proc); proc=None
+        elapsed=max(0,now_ts()-started); text=str(exc); code,_,message=text.partition('|')
+        if report_token and identity is not None and candidate is not None:
+            _candidate_reconnect_report(identity,report_token,'launch_failed',elapsed,candidate.get('db_sha256_hint','')); report_token=''
+        save_candidate_reconnect_state({
+            'status':'failed','verified':False,'started_at':started,'ended_at':now_ts(),'result_code':code or 'candidate_reconnect_failed',
+            'elapsed_seconds':elapsed,'installation_id':(identity or {}).get('installation_id',''),'node_id':(identity or {}).get('node_id',''),
+            'client_version':VERSION,'architecture':ARCH,'target_group_name':(candidate or {}).get('target_group_name',''),
+            'expected_agent_label':(candidate or {}).get('agent_label',''),'candidate_db_sha256_hint':(candidate or {}).get('db_sha256_hint',''),
+            'candidate_seen_online':candidate_seen_online,'shared_runtime_stopped':shared_stopped,
+            'candidate_meshagent_execution':candidate_execution,'existing_stable_identity_preserved':True,
+            'permanent_runtime_source_switch':False,'identity_binding_commit':False,'old_meshcentral_node_delete':False,
+            'rollback_shared_runtime_requested':False,'rollback_shared_runtime_started':False,'runtime_directory_deleted':False,
+            'technician_actions_authorized':False,'error_code':_safe_str(code or 'candidate_reconnect_failed',100),
+            'error_message':_safe_str(message or text,300)})
+        print(f"[managed] candidate reconnect verification failed code={code or 'candidate_reconnect_failed'}; stable identity preserved; permanent commit unchanged",flush=True)
+
+    finally:
+        if proc is not None:
+            _terminate_process_group(proc)
+        if agent_temp:
+            try: Path(agent_temp).unlink(missing_ok=True)
+            except OSError: cleanup_ok=False
+        if runtime_dir:
+            try: shutil.rmtree(runtime_dir)
+            except OSError: cleanup_ok=False
+        st=load_candidate_reconnect_state(); st['runtime_directory_deleted']=cleanup_ok; save_candidate_reconnect_state(st)
+        if target_material is not None:
+            try: target_material['raw']=b''
+            except Exception: pass
+        with CANDIDATE_RECONNECT_WORKER_LOCK:
+            CANDIDATE_RECONNECT_WORKER_ACTIVE=False
+        control=load_unattended_control(); local=read_policy(); server=get_server_state()
+        if control.get('enabled') and local.get('allowed_local') and server.get('authorized_server') is True and (_as_int(server.get('valid_until')) or 0)>now_ts():
+            rollback_requested=True
+            st=load_candidate_reconnect_state(); st['rollback_shared_runtime_requested']=True; save_candidate_reconnect_state(st)
+            try:
+                if not PERSISTENT_WORKER_ACTIVE:
+                    start_persistent_runtime()
+                rollback_started=True
+            except RuntimeError:
+                rollback_started=bool(PERSISTENT_WORKER_ACTIVE)
+            st=load_candidate_reconnect_state(); st['rollback_shared_runtime_started']=rollback_started; save_candidate_reconnect_state(st)
+            print(f"[managed] candidate reconnect rollback to shared unattended runtime requested={str(rollback_requested).lower()} started={str(rollback_started).lower()}",flush=True)
+
+
+def start_candidate_reconnect_canary():
+    global CANDIDATE_RECONNECT_WORKER_ACTIVE
+    with CANDIDATE_RECONNECT_WORKER_LOCK:
+        if CANDIDATE_RECONNECT_WORKER_ACTIVE:
+            raise RuntimeError('candidate_reconnect_already_running|Υπάρχει ήδη candidate reconnect verification σε εξέλιξη.')
+        if IDENTITY_RESEED_WORKER_ACTIVE or MIGRATION_CANARY_WORKER_ACTIVE or CANARY_WORKER_ACTIVE:
+            raise RuntimeError('candidate_reconnect_other_canary_active|Υπάρχει ήδη άλλο Managed canary σε εξέλιξη.')
+        if not _candidate_quarantine_exists():
+            raise RuntimeError('candidate_reconnect_quarantine_missing|Δεν υπάρχει quarantined candidate identity.')
+        if not PERSISTENT_WORKER_ACTIVE:
+            raise RuntimeError('candidate_reconnect_shared_runtime_not_running|Το shared unattended runtime πρέπει να είναι RUNNING πριν από candidate reconnect verification.')
+        CANDIDATE_RECONNECT_WORKER_ACTIVE=True
+    t=threading.Thread(target=candidate_reconnect_worker,name='managed-candidate-reconnect-canary',daemon=True)
+    t.start()
+
 def heartbeat_worker():
     last_summary = None
     while True:
@@ -3623,6 +3998,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
     migration_target_settings_state = load_group_migration_target_settings_state()
     migration_canary_state = load_group_migration_canary_state()
     identity_reseed_state = load_group_identity_reseed_state()
+    candidate_reconnect_state = load_candidate_reconnect_state()
 
     local_allowed = bool(local_snapshot.get("allowed_local"))
     server_allowed = bool(server.get("authorized_server")) and (_as_int(server.get("valid_until")) or 0) > now_ts()
@@ -3683,6 +4059,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
     migration_target_settings_html = ""
     migration_canary_html = ""
     identity_reseed_html = ""
+    candidate_reconnect_html = ""
     if identity is not None:
         enrollment_verified = (
             enrollment.get("verified") is True
@@ -3698,7 +4075,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
             enrollment_label = "Δεν έχει εκτελεστεί ακόμη"
         enrollment_time = fmt_epoch(enrollment.get("verified_at")) if enrollment_verified else "—"
         enrollment_hint = enrollment.get("source_fingerprint_hint") if enrollment_verified else "—"
-        disabled = "" if (overall and not PERSISTENT_WORKER_ACTIVE and not CANARY_WORKER_ACTIVE and not MIGRATION_CANARY_WORKER_ACTIVE and not IDENTITY_RESEED_WORKER_ACTIVE) else " disabled"
+        disabled = "" if (overall and not PERSISTENT_WORKER_ACTIVE and not CANARY_WORKER_ACTIVE and not MIGRATION_CANARY_WORKER_ACTIVE and not IDENTITY_RESEED_WORKER_ACTIVE and not CANDIDATE_RECONNECT_WORKER_ACTIVE) else " disabled"
         enrollment_html = f"""
 <section class="pairbox">
 <h2>Enrollment authorization check</h2>
@@ -4020,7 +4397,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         thost = migration_target_settings_state.get('mesh_server_host') if tcurrent else '—'
         tsha = migration_target_settings_state.get('sha256_hint') if tcurrent else '—'
         tbytes = str(migration_target_settings_state.get('bytes') or '—') if tcurrent else '—'
-        tdisabled = ' disabled' if (not overall or CANARY_WORKER_ACTIVE or MIGRATION_CANARY_WORKER_ACTIVE or IDENTITY_RESEED_WORKER_ACTIVE) else ''
+        tdisabled = ' disabled' if (not overall or CANARY_WORKER_ACTIVE or MIGRATION_CANARY_WORKER_ACTIVE or IDENTITY_RESEED_WORKER_ACTIVE or CANDIDATE_RECONNECT_WORKER_ACTIVE) else ''
         migration_target_settings_html = f"""
 <section class="pairbox">
 <h2>Per-installation target .msh verification</h2>
@@ -4079,7 +4456,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         migration_canary_html = f"""
 <section class="pairbox">
 <h2>Controlled per-installation group migration canary</h2>
-<p>Ιστορικό checkpoint 3.12.0. Απέδειξε ασφαλές stop/target execution/rollback, αλλά η υπάρχουσα stable identity δεν μεταφέρθηκε στο νέο group. Το test διατηρείται μόνο για ιστορικό και <strong>δεν επαναλαμβάνεται</strong>. Η 3.13.1 χρησιμοποιεί ξεχωριστό clean candidate identity reseed.</p>
+<p>Ιστορικό checkpoint 3.12.0. Απέδειξε ασφαλές stop/target execution/rollback, αλλά η υπάρχουσα stable identity δεν μεταφέρθηκε στο νέο group. Το test διατηρείται μόνο για ιστορικό και <strong>δεν επαναλαμβάνεται</strong>. Η 3.14.0 διατηρεί το clean reseed ως ιστορικό και προσθέτει ξεχωριστό reconnect verification της ήδη quarantined candidate.</p>
 <div class="mini-grid">
 <div><span>Κατάσταση</span><strong>{esc(gclabel)}</strong></div>
 <div><span>Target group</span><strong>{esc(gcgroup)}</strong></div>
@@ -4165,13 +4542,71 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </form>
 </section>"""
 
+        crcurrent = (
+            candidate_reconnect_state.get('installation_id') == identity['installation_id']
+            and candidate_reconnect_state.get('node_id') == identity['node_id']
+            and candidate_reconnect_state.get('architecture') == ARCH
+        )
+        crstatus = candidate_reconnect_state.get('status') if crcurrent else 'not_run'
+        if crstatus == 'running':
+            crlabel = 'RUNNING — QUARANTINED CANDIDATE RECONNECT ≤45″'
+        elif crstatus == 'reported' and candidate_reconnect_state.get('verified') is True:
+            crlabel = 'VERIFIED — EXACT BOUND CANDIDATE RECONNECTED / ROLLBACK REQUESTED'
+        elif crstatus == 'failed':
+            crlabel = 'FAILED — ' + (candidate_reconnect_state.get('error_message') or candidate_reconnect_state.get('result_code') or 'ελέγξτε logs')
+        elif crstatus == 'stopping_shared_runtime':
+            crlabel = 'PREPARING — ασφαλής τερματισμός shared runtime'
+        else:
+            crlabel = 'Δεν έχει εκτελεστεί ακόμη'
+        crgroup = candidate_reconnect_state.get('target_group_name') if crcurrent else f"Smart Pro Managed — {identity['installation_id']}"
+        crnode = candidate_reconnect_state.get('expected_agent_label') if crcurrent else (mesh_identity_status.get('agent_label') or '—')
+        crdbhint = candidate_reconnect_state.get('candidate_db_sha256_hint') if crcurrent and candidate_reconnect_state.get('candidate_db_sha256_hint') else (rhint if candidate_exists else '—')
+        crnodehint = candidate_reconnect_state.get('candidate_node_hint') if crcurrent and candidate_reconnect_state.get('candidate_node_hint') else '—'
+        crseen = 'ΝΑΙ' if crcurrent and candidate_reconnect_state.get('candidate_seen_online') else 'ΟΧΙ'
+        crshared = 'ΝΑΙ' if crcurrent and candidate_reconnect_state.get('shared_runtime_stopped') else 'ΟΧΙ'
+        crexec = 'ΝΑΙ — QUARANTINED DB REUSE ONLY' if crcurrent and candidate_reconnect_state.get('candidate_meshagent_execution') else 'ΟΧΙ'
+        crrollback = 'ΝΑΙ' if crcurrent and candidate_reconnect_state.get('rollback_shared_runtime_requested') else 'ΟΧΙ'
+        crrollbackstart = 'ΝΑΙ' if crcurrent and candidate_reconnect_state.get('rollback_shared_runtime_started') else 'ΟΧΙ'
+        crcleanup = 'ΝΑΙ' if crcurrent and candidate_reconnect_state.get('runtime_directory_deleted') else 'ΟΧΙ'
+        crresult = candidate_reconnect_state.get('result_code') if crcurrent else '—'
+        crelapsed = str(candidate_reconnect_state.get('elapsed_seconds') or '—') if crcurrent else '—'
+        crdisabled = ' disabled' if (not overall or CANDIDATE_RECONNECT_WORKER_ACTIVE or not PERSISTENT_WORKER_ACTIVE or not candidate_exists) else ''
+        candidate_reconnect_html = f"""
+<section class="pairbox">
+<h2>Quarantined candidate reconnect verification</h2>
+<p>Επαναχρησιμοποιεί <strong>μόνο</strong> την ήδη quarantined candidate identity και το verified target .msh για ένα ≤45″ foreground proof. Ο Broker 0.41.0+ παρακολουθεί read-only μέσω του dedicated controller ότι γίνεται online το <strong>ίδιο exact bound candidate node</strong>. Μετά το test επανέρχεται το shared stable runtime. <strong>Δεν γίνεται permanent source switch, identity binding commit, old-node delete ή technician authorization.</strong></p>
+<div class="mini-grid">
+<div><span>Κατάσταση</span><strong>{esc(crlabel)}</strong></div>
+<div><span>Target group</span><strong>{esc(crgroup)}</strong></div>
+<div><span>Expected label</span><strong>{esc(crnode)}</strong></div>
+<div><span>Candidate DB hint</span><strong>{esc(crdbhint)}</strong></div>
+<div><span>Bound candidate node hint</span><strong>{esc(crnodehint)}</strong></div>
+<div><span>Candidate seen online</span><strong>{esc(crseen)}</strong></div>
+<div><span>Shared runtime stopped</span><strong>{esc(crshared)}</strong></div>
+<div><span>Candidate execution</span><strong>{esc(crexec)}</strong></div>
+<div><span>Result</span><strong>{esc(crresult)}</strong></div>
+<div><span>Elapsed</span><strong>{esc(crelapsed)} s</strong></div>
+<div><span>Runtime directory deleted</span><strong>{esc(crcleanup)}</strong></div>
+<div><span>Existing stable identity preserved</span><strong>ΝΑΙ</strong></div>
+<div><span>Permanent source switch</span><strong>ΟΧΙ</strong></div>
+<div><span>Identity binding commit</span><strong>ΟΧΙ</strong></div>
+<div><span>Old MeshCentral node delete</span><strong>ΟΧΙ</strong></div>
+<div><span>Technician actions</span><strong>NOT AUTHORIZED</strong></div>
+<div><span>Rollback requested / started</span><strong>{esc(crrollback)} / {esc(crrollbackstart)}</strong></div>
+</div>
+<form method="post" action="candidate-reconnect-canary">
+<input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
+<button type="submit"{crdisabled}>Έναρξη candidate reconnect verification ≤45″</button>
+</form>
+</section>"""
+
     return f"""<!doctype html>
 <html lang="el"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Smart Pro Managed Support</title>
 <style>
 :root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;background:#10151d;color:#eef5ff;font:14px/1.5 Arial,Helvetica,sans-serif}}main{{max-width:1000px;margin:0 auto;padding:24px}}.hero{{background:#172231;border:1px solid #2c4158;border-radius:16px;padding:22px;margin-bottom:16px}}h1{{margin:0 0 5px;font-size:27px}}h2{{margin:0 0 10px;font-size:18px}}.sub{{color:#aab9ca}}.badge{{display:inline-block;margin-top:14px;padding:8px 12px;border-radius:999px;font-weight:700}}.ok{{background:#173a2a;color:#9ff0bd;border:1px solid #2c7750}}.bad{{background:#442128;color:#ffb5c0;border:1px solid #8c3d4d}}.warn{{background:#43381a;color:#ffe49a;border:1px solid #8b7331}}.note{{margin-top:15px;padding:13px 15px;border-radius:10px;background:#12293a;border:1px solid #245473;color:#cfeeff}}.notice{{margin:0 0 16px;padding:12px 14px;border-radius:10px}}.notice-ok{{background:#173a2a;border:1px solid #2c7750;color:#bdf7d0}}.notice-bad{{background:#442128;border:1px solid #8c3d4d;color:#ffd0d6}}.notice-info{{background:#12293a;border:1px solid #245473;color:#cfeeff}}.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.card,.pairbox{{background:#171d26;border:1px solid #293646;border-radius:12px;padding:15px}}.k{{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:#8fa1b5}}.v{{font-size:15px;font-weight:700;margin-top:4px;overflow-wrap:anywhere}}.pairbox{{margin:16px 0}}.pairbox p{{color:#b7c5d5}}label{{display:block;font-weight:700;margin:12px 0 6px}}input{{width:100%;max-width:460px;padding:11px 12px;border-radius:8px;border:1px solid #3b4c60;background:#0f151d;color:#fff;font:inherit}}button{{display:block;margin-top:12px;border:0;border-radius:8px;padding:10px 14px;background:#19aee8;color:#06131b;font-weight:800;cursor:pointer}}button:disabled,input:disabled{{opacity:.5;cursor:not-allowed}}code{{color:#9fdfff}}.mini-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.mini-grid div{{background:#111821;border:1px solid #28384a;border-radius:9px;padding:10px}}.mini-grid span{{display:block;color:#8fa1b5;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}}.mini-grid strong{{overflow-wrap:anywhere}}.footer{{margin-top:18px;color:#7f91a6;font-size:12px}}@media(max-width:650px){{main{{padding:14px}}.grid,.mini-grid{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.13.1 · Reseed Supervisor Lock & Candidate Quarantine Hotfix · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
+<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.14.0 · Quarantined Candidate Reconnect Verification Consumer · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
 {notice_html}
 {pair_html}
 {enrollment_html}
@@ -4184,6 +4619,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 {migration_target_settings_html}
 {migration_canary_html}
 {identity_reseed_html}
+{candidate_reconnect_html}
 <section class="grid">
 <div class="card"><div class="k">Installation ID</div><div class="v">{esc(policy.get('installation_id') or (identity or {}).get('installation_id'))}</div></div>
 <div class="card"><div class="k">Smart Pro Tools</div><div class="v">v{esc((policy.get('source') or {}).get('addon_version'))} · Online: {esc(tools_online)}</div></div>
@@ -4199,12 +4635,12 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <div class="card"><div class="k">MeshCentral stable identity</div><div class="v">{esc(mesh_identity_label)} · generation {esc(mesh_identity_generation)} · runs {esc(mesh_identity_runs)} · DB {esc(mesh_identity_db_hint)} · {esc(mesh_identity_updated)}</div></div>
 <div class="card"><div class="k">Remote access</div><div class="v">Όχι — το node μπορεί να είναι online, αλλά web/Terminal/Files technician actions παραμένουν NOT AUTHORIZED</div></div>
 </section>
-<div class="footer">3.13.1 reseed supervisor-lock hotfix. Η υπάρχουσα stable identity και η quarantined candidate παραμένουν ανέγγιχτες. Το target .msh εκτελείται μόνο σε ≤45s foreground canary ΧΩΡΙΣ το παλιό meshagent.db, ώστε να δημιουργηθεί μία quarantined candidate identity στο per-installation group. Δεν γίνεται permanent source/binding commit και δεν ενεργοποιούνται technician actions.</div>
+<div class="footer">3.14.0 candidate reconnect verification. Η υπάρχουσα stable identity και η quarantined candidate παραμένουν ανέγγιχτες. Η candidate DB επαναχρησιμοποιείται μόνο σε ≤45s foreground verification ώστε ο Broker να αποδείξει read-only ότι επανέρχεται το ίδιο exact bound candidate node. Δεν γίνεται permanent source/binding commit, old-node delete ή technician authorization.</div>
 </main></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SmartProManaged/3.13.1"
+    server_version = "SmartProManaged/3.14.0"
 
     def _send(self, code, body, content_type):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
@@ -4268,6 +4704,9 @@ class Handler(BaseHTTPRequestHandler):
                 "group_migration_canary_verified": bool(load_group_migration_canary_state().get("verified")),
                 "group_migration_canary_active": bool(MIGRATION_CANARY_WORKER_ACTIVE),
                 "group_identity_reseed_canary_active": bool(IDENTITY_RESEED_WORKER_ACTIVE),
+                "candidate_reconnect_status": load_candidate_reconnect_state().get("status") or "not_run",
+                "candidate_reconnect_verified": bool(load_candidate_reconnect_state().get("verified")),
+                "candidate_reconnect_active": bool(CANDIDATE_RECONNECT_WORKER_ACTIVE),
                 "unattended_runtime_enabled": bool(load_unattended_control().get("enabled")),
                 "technician_actions_authorized": False,
                 "installation_id": policy.get("installation_id") or server.get("installation_id"),
@@ -4290,7 +4729,8 @@ class Handler(BaseHTTPRequestHandler):
         is_group_migration_target_settings = path.endswith("/group-migration-target-settings") or path == "group-migration-target-settings"
         is_group_migration_canary = path.endswith("/group-migration-canary") or path == "group-migration-canary"
         is_group_identity_reseed_canary = path.endswith("/group-identity-reseed-canary") or path == "group-identity-reseed-canary"
-        if not is_pair and not is_enrollment and not is_settings and not is_agent and not is_runtime and not is_canary and not is_persistent_start and not is_persistent_stop and not is_group_migration_preflight and not is_group_migration_target_settings and not is_group_migration_canary and not is_group_identity_reseed_canary:
+        is_candidate_reconnect_canary = path.endswith("/candidate-reconnect-canary") or path == "candidate-reconnect-canary"
+        if not is_pair and not is_enrollment and not is_settings and not is_agent and not is_runtime and not is_canary and not is_persistent_start and not is_persistent_stop and not is_group_migration_preflight and not is_group_migration_target_settings and not is_group_migration_canary and not is_group_identity_reseed_canary and not is_candidate_reconnect_canary:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
         length = _as_int(self.headers.get("Content-Length")) or 0
@@ -4306,7 +4746,7 @@ class Handler(BaseHTTPRequestHandler):
         if not secrets.compare_digest(csrf, CSRF_TOKEN):
             self._send(403, render_page(read_policy(), "Η φόρμα ενεργοποίησης έληξε. Ανανεώστε τη σελίδα.", "bad"), "text/html; charset=utf-8")
             return
-        if PERSISTENT_WORKER_ACTIVE and not (is_persistent_stop or is_group_migration_preflight or is_group_migration_target_settings or is_group_migration_canary or is_group_identity_reseed_canary):
+        if PERSISTENT_WORKER_ACTIVE and not (is_persistent_stop or is_group_migration_preflight or is_group_migration_target_settings or is_group_migration_canary or is_group_identity_reseed_canary or is_candidate_reconnect_canary):
             self._send(409, render_page(read_policy(), "Η continuous Managed λειτουργία είναι ενεργή. Επιτρέπονται μόνο ασφαλής τερματισμός ή οι verification-only migration έλεγχοι.", "bad"), "text/html; charset=utf-8")
             return
         if is_pair:
@@ -4421,6 +4861,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(409,render_page(read_policy(),message,"bad"),"text/html; charset=utf-8")
             return
 
+        if is_candidate_reconnect_canary:
+            try:
+                start_candidate_reconnect_canary()
+                self._send(202, render_page(read_policy(), "Το quarantined candidate reconnect verification ξεκίνησε. Κρατήστε ανοιχτό το MeshCentral: το shared stable node θα πέσει προσωρινά offline και πρέπει να ξαναγίνει online η ΗΔΗ ΥΠΑΡΧΟΥΣΑ candidate στο Smart Pro Managed — ID-95948, χωρίς να δημιουργηθεί νέα συσκευή. Μετά από ≤45″ η candidate θα σταματήσει και το shared runtime θα επανέλθει. Μην ανοίξετε Desktop/Terminal/Files και μην διαγράψετε/μετακινήσετε καμία συσκευή. Κάντε refresh εδώ μετά από περίπου 60–90 δευτερόλεπτα.", "info"), "text/html; charset=utf-8")
+            except RuntimeError as exc:
+                message=str(exc).partition('|')[2] or "Δεν ήταν δυνατή η εκκίνηση του candidate reconnect verification."
+                self._send(409,render_page(read_policy(),message,"bad"),"text/html; charset=utf-8")
+            return
+
         if is_persistent_start:
             try:
                 save_unattended_control(True, 'admin_enabled')
@@ -4501,7 +4950,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"[managed] Smart Pro Managed Support {VERSION} clean per-installation identity reseed canary listening on {PORT}", flush=True)
+    print(f"[managed] Smart Pro Managed Support {VERSION} quarantined candidate reconnect verification consumer listening on {PORT}", flush=True)
     boot_identity = get_mesh_identity_status(load_identity())
     boot_control = load_unattended_control()
     print(f"[managed] mesh identity state={boot_identity.get('state')} generation={boot_identity.get('generation', 0)} continuity_runs={boot_identity.get('continuity_runs', 0)}; unattended_enabled={str(bool(boot_control.get('enabled'))).lower()}", flush=True)

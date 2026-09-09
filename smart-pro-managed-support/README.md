@@ -1,3 +1,3 @@
-# 3.13.1 controlled migration canary
+# Smart Pro Managed Support 3.14.0
 
-First real per-installation group connectivity canary. It reuses the existing protected stable identity, never commits the target binding, and rolls back to the shared unattended runtime after <=45 seconds.
+Candidate reconnect verification consumer. Reuses the existing quarantined candidate identity for a controlled <=45s proof against Broker 0.41.0+, then rolls back to the stable shared unattended runtime. No permanent promotion or technician access.
