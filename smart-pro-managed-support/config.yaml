@@ -1,6 +1,6 @@
 name: "Smart Pro Managed Support"
-description: "Permanent Candidate Promotion. Προωθεί την verified quarantined candidate στο per-installation group ως νέα stable identity με local rollback backup, χωρίς old-node delete ή technician access."
-version: "3.15.1"
+description: "Permanent Candidate Promotion telemetry hotfix. Διατηρεί το runtime_source στο persisted-state reader ώστε το target RUNNING gate να αναγνωρίζεται σωστά, με rollback-first safety."
+version: "3.15.2"
 slug: "smart_pro_managed_support"
 arch:
   - aarch64

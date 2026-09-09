@@ -1,11 +1,8 @@
-# 3.15.1 — Promotion Verification Window Synchronization Hotfix
-- Waits for the committed TARGET persistent runtime to become locally RUNNING before starting Broker read-only candidate observation.
-- Requires Broker 0.42.1+ armed promotion contract so the external verification window no longer burns while the target runtime is being prepared.
-- Adds bounded non-secret diagnostics when the target runtime is ready and when the exact bound candidate is first observed online.
-- Retains rollback-first promotion semantics, old-node retention and technician lock.
-- Adds permanent promotion of the already verified quarantined candidate.
-- Atomically retains the old shared identity as a local rollback backup.
-- Promoted continuous runtime uses the verified per-installation target source.
-- Broker read-only watch must observe the exact bound candidate online.
-- On failed post-commit verification, restores the shared identity and runtime.
-- No old MeshCentral node deletion or technician authorization.
+# 3.15.2 — Persistent Runtime Source Telemetry Hotfix
+
+- Fixes the live 3.15.1 promotion failure `promotion_target_runtime_start_timeout`.
+- `save_persistent_state()` already persisted `runtime_source`, but `load_persistent_state()` did not return it.
+- The promotion worker therefore could not observe `status=running` together with `runtime_source=target`, even though the target MeshAgent had actually started.
+- Adds `runtime_source` to the sanitized persistent-state reader only.
+- Broker 0.42.1 contract, candidate identity, rollback-first commit, exact bound-node verification, old-node retention, and technician authorization remain unchanged.
+- No node deletion, permission mutation, service persistence, re-pair, or `/data` reset.
