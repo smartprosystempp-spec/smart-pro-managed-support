@@ -1,6 +1,6 @@
 name: "Smart Pro Managed Support"
-description: "API Gateway endpoint switch. Χρησιμοποιεί το dedicated api.smart-pro-system.gr για Managed Broker machine traffic, χωρίς αλλαγή identity/runtime/promotion logic."
-version: "3.15.3"
+description: "Portal-bound first-device settings verification consumer για το hard-pinned ID-34973. One-time .msh delivery χωρίς MeshAgent execution ή device enrollment."
+version: "3.16.0"
 slug: "smart_pro_managed_support"
 arch:
   - aarch64

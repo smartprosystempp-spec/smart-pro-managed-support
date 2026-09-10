@@ -1,3 +1,5 @@
-# Smart Pro Managed Support 3.15.3
+# Smart Pro Managed Support 3.16.0
 
-Dedicated API Gateway endpoint switch. The promoted TARGET identity and runtime remain unchanged. Only the default Broker hostname changes to `api.smart-pro-system.gr` so machine traffic can continue while the public site is password-protected.
+Portal-bound first-device settings verification consumer for Broker 0.51.0.
+
+Hard-pinned QA scope: `ID-34973`, `amd64`, exact active Managed identity. The add-on can request and consume one one-time `smart-pro-first-device-settings-v1` ticket and verify the prepared `.msh` only in memory. Raw settings are not persisted and MeshAgent execution, device enrollment, remote access and technician actions remain disabled.

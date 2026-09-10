@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.16.0
+- Adds verification-only consumer for Broker 0.51.0 Portal-bound first-device settings contract.
+- Hard-pinned to ID-34973 / amd64 / exact Managed 3.16.0 identity.
+- One-time SPMFD ticket and raw .msh remain memory-only.
+- Persists only non-secret verification metadata.
+- Does not execute MeshAgent, create/enroll a device, authorize remote access, or enable technician actions.
+- Keeps the dedicated api.smart-pro-system.gr Broker endpoint and existing 3.15.3 identity/state.
+
+# Changelog
+
 ## 3.15.3
 - Switched the default Managed Broker base URL from the public site hostname to the dedicated API gateway: `https://api.smart-pro-system.gr/wp-json/smart-pro-remote/v1`.
 - No change to identity files, promoted TARGET runtime, MeshAgent execution logic, lease logic, rollback backup, group binding, technician authorization, or MeshCentral node lifecycle.
