@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.17.1
+- UI continuity hotfix over 3.17.0. Restores all previously built Managed diagnostic/status panels that 3.17.0 accidentally hid at render time.
+- Keeps every legacy mutation control visibly disabled during the first-device execution checkpoint; the existing server-side legacy POST block remains authoritative.
+- Does not change the bounded first-device execution algorithm, identity files, one-time settings proof, MeshAgent binary verification, runtime limit, persistence rules, technician authorization, or device lifecycle.
+- Requires Broker 0.53.1, which pins the execution client to exact Managed Support 3.17.1.
+
 ## 3.17.0
 - Adds the hard-pinned `ID-34973` / `amd64` bounded first-device execution consumer for Broker 0.53.0.
 - Requires explicit server-side admin arm and a fresh 0-device exact-mesh recheck before client start.

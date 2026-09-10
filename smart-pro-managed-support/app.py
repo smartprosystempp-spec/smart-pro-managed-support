@@ -21,7 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.17.0")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.17.1")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -96,7 +96,7 @@ FINGERPRINT_HINT_RE = re.compile(r"^[a-f0-9]{12}$")
 FIRST_DEVICE_MESH_HINT_RE = re.compile(r"^[a-f0-9]{16}$")
 FIRST_DEVICE_INSTALLATION = "ID-34973"
 FIRST_DEVICE_GROUP = "Smart Pro Managed — ID-34973"
-FIRST_DEVICE_EXECUTION_VERSION = "3.17.0"
+FIRST_DEVICE_EXECUTION_VERSION = "3.17.1"
 FIRST_DEVICE_EXECUTION_MAX_RUNTIME = 75
 FIRST_DEVICE_EXECUTION_SHUTDOWN_GRACE = 3
 MIN_AGENT_BYTES = 100000
@@ -1173,7 +1173,7 @@ def first_device_execution_worker():
     try:
         if identity is None: raise RuntimeError('first_device_execution_not_paired|Απαιτείται ενεργή Managed identity.')
         if VERSION != FIRST_DEVICE_EXECUTION_VERSION or ARCH != 'amd64' or identity.get('installation_id') != FIRST_DEVICE_INSTALLATION:
-            raise RuntimeError('first_device_execution_scope|Το bounded first-device canary επιτρέπεται μόνο στο exact ID-34973 / 3.17.0 / amd64.')
+            raise RuntimeError('first_device_execution_scope|Το bounded first-device canary επιτρέπεται μόνο στο exact ID-34973 / 3.17.1 / amd64.')
         if not read_policy().get('allowed_local'):
             raise RuntimeError('first_device_execution_local_policy|Η τοπική Managed πολιτική δεν επιτρέπει το first-device canary.')
         server=get_server_state(); server_until=_as_int(server.get('valid_until')) or 0
@@ -5008,7 +5008,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
 <label for="pairing_code">One-time pairing code</label>
 <input id="pairing_code" name="pairing_code" type="text" inputmode="text" maxlength="100" placeholder="SPM-XXXX-XXXX-XXXX-XXXX" required autocomplete="off"{disabled}>
-<button type="submit"{disabled}>Ενεργοποίηση Managed identity</button>
+<button type="submit" disabled{disabled}>Ενεργοποίηση Managed identity</button>
 </form>
 </section>'''
 
@@ -5052,7 +5052,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </div>
 <form method="post" action="enrollment-check">
 <input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
-<button type="submit"{disabled}>Έλεγχος enrollment authorization</button>
+<button type="submit" disabled{disabled}>Έλεγχος enrollment authorization</button>
 </form>
 </section>"""
 
@@ -5099,7 +5099,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </div>
 <form method="post" action="first-device-settings-check">
 <input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
-<button type="submit"{fd_disabled}>Verify one-time ID-34973 settings — NO EXECUTION</button>
+<button type="submit" disabled{fd_disabled}>Verify one-time ID-34973 settings — NO EXECUTION</button>
 </form>
 </section>"""
 
@@ -5132,12 +5132,12 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
             or PERSISTENT_WORKER_ACTIVE or CANARY_WORKER_ACTIVE or MIGRATION_CANARY_WORKER_ACTIVE or IDENTITY_RESEED_WORKER_ACTIVE or CANDIDATE_RECONNECT_WORKER_ACTIVE or PROMOTION_WORKER_ACTIVE) else ''
         first_device_execution_html = f"""
 <section class="pairbox">
-<h2>Portal-bound bounded first-device execution — 3.17.0</h2>
-<p>Hard-pinned αποκλειστικά στο <strong>ID-34973 / amd64</strong>. Λειτουργεί μόνο μετά από προσωρινό admin arm στον Broker 0.53.0. Καταναλώνει μία φορά το exact execution contract, επαληθεύει ξανά το prepared <code>.msh</code> και το approved MeshAgent, ζητά fresh 0-device start window και εκτελεί τον agent μόνο <strong>foreground / bounded ≤75″</strong>. Δεν χρησιμοποιεί <code>-install</code>, δεν δημιουργεί service/systemd και technician actions παραμένουν <strong>NOT AUTHORIZED</strong>. Δεν υπάρχει automatic retry.</p>
+<h2>Portal-bound bounded first-device execution — 3.17.1</h2>
+<p>Hard-pinned αποκλειστικά στο <strong>ID-34973 / amd64</strong>. Λειτουργεί μόνο μετά από προσωρινό admin arm στον Broker 0.53.1. Καταναλώνει μία φορά το exact execution contract, επαληθεύει ξανά το prepared <code>.msh</code> και το approved MeshAgent, ζητά fresh 0-device start window και εκτελεί τον agent μόνο <strong>foreground / bounded ≤75″</strong>. Δεν χρησιμοποιεί <code>-install</code>, δεν δημιουργεί service/systemd και technician actions παραμένουν <strong>NOT AUTHORIZED</strong>. Δεν υπάρχει automatic retry.</p>
 <div class="mini-grid">
 <div><span>Κατάσταση</span><strong>{esc(fdx_label)}</strong></div>
 <div><span>Installation</span><strong>ID-34973 ONLY</strong></div>
-<div><span>Client / Arch</span><strong>3.17.0 / amd64</strong></div>
+<div><span>Client / Arch</span><strong>3.17.1 / amd64</strong></div>
 <div><span>Τελευταίο state</span><strong>{esc(fdx_time)}</strong></div>
 <div><span>Source fingerprint hint</span><strong>{esc(fdx_source)}</strong></div>
 <div><span>Immutable Mesh hint</span><strong>{esc(fdx_mesh)}</strong></div>
@@ -5185,7 +5185,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </div>
 <form method="post" action="settings-check">
 <input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
-<button type="submit"{disabled}>Έλεγχος secure settings</button>
+<button type="submit" disabled{disabled}>Έλεγχος secure settings</button>
 </form>
 </section>"""
 
@@ -5217,7 +5217,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </div>
 <form method="post" action="agent-check">
 <input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
-<button type="submit"{disabled}>Έλεγχος MeshAgent binary</button>
+<button type="submit" disabled{disabled}>Έλεγχος MeshAgent binary</button>
 </form>
 </section>"""
 
@@ -5259,7 +5259,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </div>
 <form method="post" action="runtime-lease-check">
 <input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
-<button type="submit"{runtime_button_disabled}>Έλεγχος runtime lease</button>
+<button type="submit" disabled{runtime_button_disabled}>Έλεγχος runtime lease</button>
 </form>
 </section>"""
     else:
@@ -5318,7 +5318,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </div>
 <form method="post" action="identity-continuity-canary">
 <input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
-<button type="submit"{canary_disabled}>Έναρξη identity continuity canary ≤45″</button>
+<button type="submit" disabled{canary_disabled}>Έναρξη identity continuity canary ≤45″</button>
 </form>
 </section>"""
 
@@ -5381,11 +5381,11 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </div>
 <form method="post" action="continuous-runtime-start">
 <input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
-<button type="submit"{pstart_disabled}>Ενεργοποίηση unattended Managed runtime</button>
+<button type="submit" disabled{pstart_disabled}>Ενεργοποίηση unattended Managed runtime</button>
 </form>
 <form method="post" action="continuous-runtime-stop">
 <input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
-<button type="submit"{pstop_disabled}>Παύση unattended Managed runtime</button>
+<button type="submit" disabled{pstop_disabled}>Παύση unattended Managed runtime</button>
 </form>
 </section>"""
 
@@ -5433,7 +5433,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </div>
 <form method="post" action="group-migration-preflight">
 <input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
-<button type="submit"{mdisabled}>Έλεγχος migration preflight</button>
+<button type="submit" disabled{mdisabled}>Έλεγχος migration preflight</button>
 </form>
 </section>"""
 
@@ -5484,7 +5484,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </div>
 <form method="post" action="group-migration-target-settings">
 <input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
-<button type="submit"{tdisabled}>Έλεγχος target .msh</button>
+<button type="submit" disabled{tdisabled}>Έλεγχος target .msh</button>
 </form>
 </section>"""
 
@@ -5538,7 +5538,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </div>
 <form method="post" action="group-migration-canary">
 <input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
-<button type="submit"{gcdisabled}>Παλιό migration canary — ολοκληρώθηκε / δεν επαναλαμβάνεται</button>
+<button type="submit" disabled{gcdisabled}>Παλιό migration canary — ολοκληρώθηκε / δεν επαναλαμβάνεται</button>
 </form>
 </section>"""
 
@@ -5601,7 +5601,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </div>
 <form method="post" action="group-identity-reseed-canary">
 <input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
-<button type="submit"{rdisabled}>Έναρξη clean candidate reseed canary ≤45″</button>
+<button type="submit" disabled{rdisabled}>Έναρξη clean candidate reseed canary ≤45″</button>
 </form>
 </section>"""
 
@@ -5659,7 +5659,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </div>
 <form method="post" action="candidate-reconnect-canary">
 <input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
-<button type="submit"{crdisabled}>Έναρξη candidate reconnect verification ≤45″</button>
+<button type="submit" disabled{crdisabled}>Έναρξη candidate reconnect verification ≤45″</button>
 </form>
 </section>"""
 
@@ -5698,24 +5698,16 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </div>
 <form method="post" action="candidate-promotion">
 <input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
-<button type="submit"{promo_disabled}>Έναρξη permanent promotion</button>
+<button type="submit" disabled{promo_disabled}>Έναρξη permanent promotion</button>
 </form>
 </section>"""
 
     if VERSION == FIRST_DEVICE_EXECUTION_VERSION:
-        enrollment_html = ""
-        first_device_settings_html = ""
-        settings_html = ""
-        agent_html = ""
-        runtime_html = ""
-        canary_html = ""
-        persistent_html = ""
-        migration_preflight_html = ""
-        migration_target_settings_html = ""
-        migration_canary_html = ""
-        identity_reseed_html = ""
-        candidate_reconnect_html = ""
-        promotion_html = ""
+        # 3.17.1 UI continuity hotfix: keep all previously built diagnostic/status
+        # panels visible, but freeze every legacy mutation control. The server-side
+        # POST guard below remains the authoritative safety boundary.
+        legacy_locked_note = '<div class="notice notice-info">3.17.1 UI continuity: τα προηγούμενα diagnostic/status panels παραμένουν ορατά. Οι legacy ενέργειες είναι κλειδωμένες όσο ισχύει το bounded first-device execution checkpoint.</div>'
+        enrollment_html = legacy_locked_note + enrollment_html
 
     return f"""<!doctype html>
 <html lang="el"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -5723,7 +5715,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <style>
 :root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;background:#10151d;color:#eef5ff;font:14px/1.5 Arial,Helvetica,sans-serif}}main{{max-width:1000px;margin:0 auto;padding:24px}}.hero{{background:#172231;border:1px solid #2c4158;border-radius:16px;padding:22px;margin-bottom:16px}}h1{{margin:0 0 5px;font-size:27px}}h2{{margin:0 0 10px;font-size:18px}}.sub{{color:#aab9ca}}.badge{{display:inline-block;margin-top:14px;padding:8px 12px;border-radius:999px;font-weight:700}}.ok{{background:#173a2a;color:#9ff0bd;border:1px solid #2c7750}}.bad{{background:#442128;color:#ffb5c0;border:1px solid #8c3d4d}}.warn{{background:#43381a;color:#ffe49a;border:1px solid #8b7331}}.note{{margin-top:15px;padding:13px 15px;border-radius:10px;background:#12293a;border:1px solid #245473;color:#cfeeff}}.notice{{margin:0 0 16px;padding:12px 14px;border-radius:10px}}.notice-ok{{background:#173a2a;border:1px solid #2c7750;color:#bdf7d0}}.notice-bad{{background:#442128;border:1px solid #8c3d4d;color:#ffd0d6}}.notice-info{{background:#12293a;border:1px solid #245473;color:#cfeeff}}.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.card,.pairbox{{background:#171d26;border:1px solid #293646;border-radius:12px;padding:15px}}.k{{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:#8fa1b5}}.v{{font-size:15px;font-weight:700;margin-top:4px;overflow-wrap:anywhere}}.pairbox{{margin:16px 0}}.pairbox p{{color:#b7c5d5}}label{{display:block;font-weight:700;margin:12px 0 6px}}input{{width:100%;max-width:460px;padding:11px 12px;border-radius:8px;border:1px solid #3b4c60;background:#0f151d;color:#fff;font:inherit}}button{{display:block;margin-top:12px;border:0;border-radius:8px;padding:10px 14px;background:#19aee8;color:#06131b;font-weight:800;cursor:pointer}}button:disabled,input:disabled{{opacity:.5;cursor:not-allowed}}code{{color:#9fdfff}}.mini-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.mini-grid div{{background:#111821;border:1px solid #28384a;border-radius:9px;padding:10px}}.mini-grid span{{display:block;color:#8fa1b5;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}}.mini-grid strong{{overflow-wrap:anywhere}}.footer{{margin-top:18px;color:#7f91a6;font-size:12px}}@media(max-width:650px){{main{{padding:14px}}.grid,.mini-grid{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.17.0 · Portal-Bound Bounded First-Device Execution Canary · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
+<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.17.1 · Portal-Bound Bounded First-Device Execution Canary · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
 {notice_html}
 {pair_html}
 {enrollment_html}
@@ -5755,12 +5747,12 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <div class="card"><div class="k">MeshCentral stable identity</div><div class="v">{esc(mesh_identity_label)} · generation {esc(mesh_identity_generation)} · runs {esc(mesh_identity_runs)} · DB {esc(mesh_identity_db_hint)} · {esc(mesh_identity_updated)}</div></div>
 <div class="card"><div class="k">Remote access</div><div class="v">Όχι — το node μπορεί να είναι online, αλλά web/Terminal/Files technician actions παραμένουν NOT AUTHORIZED</div></div>
 </section>
-<div class="footer">3.17.0 bounded first-device execution canary. Hard-pinned ID-34973 / amd64 / Broker 0.53.0. Απαιτεί προσωρινό admin arm, one-time execution/material delivery και fresh 0-device start verification. Εκτελεί μόνο foreground ≤75s, χωρίς -install/service persistence και χωρίς technician authorization. Δεν υπάρχει automatic retry.</div>
+<div class="footer">3.17.1 bounded first-device execution canary. Hard-pinned ID-34973 / amd64 / Broker 0.53.1. Απαιτεί προσωρινό admin arm, one-time execution/material delivery και fresh 0-device start verification. Εκτελεί μόνο foreground ≤75s, χωρίς -install/service persistence και χωρίς technician authorization. Δεν υπάρχει automatic retry.</div>
 </main></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SmartProManaged/3.17.0"
+    server_version = "SmartProManaged/3.17.1"
 
     def _send(self, code, body, content_type):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
@@ -5876,7 +5868,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(403, render_page(read_policy(), "Η φόρμα ενεργοποίησης έληξε. Ανανεώστε τη σελίδα.", "bad"), "text/html; charset=utf-8")
             return
         if VERSION == FIRST_DEVICE_EXECUTION_VERSION and not is_first_device_execution:
-            self._send(409, render_page(read_policy(), "Η 3.17.0 είναι κλειδωμένο first-device execution checkpoint. Καμία legacy Managed ενέργεια δεν επιτρέπεται από αυτό το build.", "bad"), "text/html; charset=utf-8")
+            self._send(409, render_page(read_policy(), "Η 3.17.1 είναι κλειδωμένο first-device execution checkpoint. Καμία legacy Managed ενέργεια δεν επιτρέπεται από αυτό το build.", "bad"), "text/html; charset=utf-8")
             return
         if PERSISTENT_WORKER_ACTIVE and not (is_persistent_stop or is_group_migration_preflight or is_group_migration_target_settings or is_group_migration_canary or is_group_identity_reseed_canary or is_candidate_reconnect_canary or is_candidate_promotion):
             self._send(409, render_page(read_policy(), "Η continuous Managed λειτουργία είναι ενεργή. Επιτρέπονται μόνο ασφαλής τερματισμός ή οι verification-only migration έλεγχοι.", "bad"), "text/html; charset=utf-8")
@@ -6127,5 +6119,5 @@ if __name__ == "__main__":
         unattended_thread = threading.Thread(target=unattended_supervisor, name="managed-unattended-supervisor", daemon=True)
         unattended_thread.start()
     else:
-        print("[managed] 3.17.0 checkpoint lock: unattended supervisor NOT started; first-device execution requires explicit Broker arm + UI action", flush=True)
+        print("[managed] 3.17.1 checkpoint lock: unattended supervisor NOT started; first-device execution requires explicit Broker arm + UI action", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
