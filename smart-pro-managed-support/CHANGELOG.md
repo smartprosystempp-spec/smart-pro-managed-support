@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.17.0
+- Adds the hard-pinned `ID-34973` / `amd64` bounded first-device execution consumer for Broker 0.53.0.
+- Requires explicit server-side admin arm and a fresh 0-device exact-mesh recheck before client start.
+- Consumes one-time execution/settings/agent material only in memory or ephemeral `/tmp` runtime.
+- Runs MeshAgent foreground only for at most 75 seconds; never uses `-install` or service persistence.
+- Persists only the resulting protected `meshagent.db` identity after normal bounded completion for later continuity QA.
+- Final local PASS requires Broker report `first_device_verified` and exactly one device.
+- No automatic retry; technician actions remain disabled.
+
 ## 3.16.0
 - Adds verification-only consumer for Broker 0.51.0 Portal-bound first-device settings contract.
 - Hard-pinned to ID-34973 / amd64 / exact Managed 3.16.0 identity.
