@@ -1,5 +1,26 @@
-# Update 3.0.0 → 3.6.0
+# Update Smart Pro Managed Support repository
 
-Upload/replace the repository files from this package in the existing `smart-pro-managed-support` GitHub repository. Keep the same repository and slug; do not create another Home Assistant repository.
+## Κανονικό add-on update
 
-After commit/push, refresh the Home Assistant add-on store and update **Smart Pro Managed Support** to 3.6.0. Do not remove the add-on first, so its private `/data` remains preserved for future updates.
+1. Κρατήστε το ίδιο GitHub repository και το ίδιο add-on slug `smart_pro_managed_support`.
+2. Αντικαταστήστε μόνο τα αρχεία που παρέχονται από το νέο verified package.
+3. Κάντε commit/push.
+4. Στο Home Assistant ανοίξτε Add-on Store → Check for updates.
+5. Κάντε **update in place**. Μην κάνετε uninstall και μην διαγράφετε `/data`.
+
+## Για το root-documentation cleanup της 3.18.1
+
+Αν ενημερώνετε μόνο τα root docs του repository, αντικαταστήστε μόνο:
+
+- `README.md`
+- `ARCHITECTURE.md`
+- `SECURITY.md`
+- `UPLOAD-TO-GITHUB.md`
+- `CHANGELOG.md`
+- `.gitignore` / `repository.yaml` μόνο αν περιλαμβάνονται στο πακέτο
+
+Μην ξανανεβάζετε τον εσωτερικό φάκελο `smart-pro-managed-support/` όταν δεν υπάρχει runtime release.
+
+## Generated Python files
+
+Το repository δεν πρέπει να περιέχει `__pycache__/` ή `*.pyc`. Αν έχουν ήδη γίνει commit, διαγράψτε τα από το GitHub repository. Το `.gitignore` αποτρέπει την επανεισαγωγή τους σε μελλοντικά commits.
