@@ -1,9 +1,16 @@
-# Smart Pro Managed Support 3.17.3
+# Smart Pro Managed Support 3.18.0 — UI / Diagnostic Archive
 
-Bounded first-device execution canary for the hard-pinned Portal-bound `ID-34973` / `amd64` target.
+3.18.0 is a presentation and documentation release over the verified 3.17.7 unattended lifecycle.
 
-Requires a compatible Broker execution gate, fresh Managed heartbeat/server authorization, and an explicit temporary Broker admin arm. The client consumes one execution contract, verifies exact `.msh` + approved MeshAgent material, requires a fresh zero-device start gate, runs MeshAgent foreground-only for at most 75 seconds, then reports the exact-mesh device count.
+The everyday view now prioritizes current authorization/runtime health, unattended state, lease/reconnect counters, expected stable node and the next safe action. The active unattended runtime controls remain outside collapsed sections.
 
-No `-install`, no service/systemd persistence, no technician Desktop/Terminal/Files authorization, and no automatic retry.
+All prior diagnostic/checkpoint cards remain available under collapsible groups:
+- Diagnostic chain tools — enrollment, secure settings, MeshAgent binary and runtime-lease dry-run.
+- Identity/connectivity diagnostics — bounded identity-continuity canary.
+- Provisioning / Migration / Recovery — preflight, target settings, migration canary, identity reseed, candidate reconnect and permanent promotion.
+- Completed first-device checkpoints — Portal-bound settings and controlled retry/reset + bounded first-device execution.
+- Detailed Policy & Authorization — the original low-level status grid.
 
-3.17.7 preserves first-device target compatibility across subsequent successful runtime metadata hydration and manual re-enable cycles.
+Archived actions are UI-disabled and also blocked by the 3.18.0 server-side POST safety gate. They are retained as forensic history and future maintenance tooling, not as routine buttons.
+
+The customer-facing Managed onboarding/activation flow is intentionally out of scope for 3.18.0 and will be designed separately around Portal-owned installation activation.

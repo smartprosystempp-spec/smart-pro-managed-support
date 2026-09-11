@@ -1,3 +1,13 @@
+## 3.18.0 — UI Consolidation & Diagnostic Archive
+- UI-only consolidation over the live-verified 3.17.7 ID-34973 lifecycle baseline.
+- Adds compact Current State / Next Action operational snapshot.
+- Keeps the active unattended runtime card visible and operational.
+- Moves historical diagnostics/checkpoints into collapsible sections without deleting state, forms or forensic information.
+- Adds per-tool documentation: impact, when to use, prerequisites, rerun policy and result interpretation.
+- Visibly locks historical mutation/test buttons; server-side stable gate accepts only explicit unattended start/stop.
+- Keeps the old technical pairing UI only as locked reference pending the separate Portal customer onboarding/activation flow.
+- No runtime algorithm, stable identity binding, lease/reconnect logic, Broker contract, MeshCentral permissions, service persistence or technician authorization change.
+
 ## 3.17.7 — First-Device Target Binding Continuity
 - Built directly from live 3.17.6 after successful unattended runtime + restart recovery + pause/restart QA, followed by a manual re-enable failure `persistent_target_binding_changed`.
 - Root cause: 3.17.6 detected first-device compatibility only while target binding/source hints were still empty. The first successful target runtime correctly hydrated those fields, so the next start no longer entered the compatibility path even though the durable first-device provenance was unchanged.

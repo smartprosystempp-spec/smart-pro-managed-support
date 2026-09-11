@@ -21,7 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.17.7")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.18.0")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -98,7 +98,7 @@ FIRST_DEVICE_MESH_HINT_RE = re.compile(r"^[a-f0-9]{16}$")
 FIRST_DEVICE_INSTALLATION = "ID-34973"
 FIRST_DEVICE_GROUP = "Smart Pro Managed — ID-34973"
 FIRST_DEVICE_EXECUTION_VERSION = "3.17.4"
-CONTINUOUS_LIFECYCLE_VERSION = "3.17.7"
+CONTINUOUS_LIFECYCLE_VERSION = "3.18.0"
 FIRST_DEVICE_EXECUTION_MAX_RUNTIME = 75
 FIRST_DEVICE_EXECUTION_SHUTDOWN_GRACE = 3
 MIN_AGENT_BYTES = 100000
@@ -5177,16 +5177,23 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 
     pair_html = ""
     if identity is None:
-        disabled = "" if local_allowed else " disabled"
+        activation_locked = VERSION == CONTINUOUS_LIFECYCLE_VERSION
+        disabled = "" if (local_allowed and not activation_locked) else " disabled"
+        activation_note = (
+            '<div class="tool-lock">3.18.0: η παλιά τεχνική pairing φόρμα παραμένει ορατή μόνο ως αναφορά και είναι κλειδωμένη. '
+            'Το customer onboarding / Portal activation θα υλοποιηθεί ως ξεχωριστή ροή.</div>'
+            if activation_locked else ""
+        )
         pair_html = f'''
-<section class="pairbox">
+<section class="pairbox operational-card">
 <h2>Αρχική ενεργοποίηση Managed Support</h2>
 <p>Στο WordPress: <strong>Remote Sessions → Managed Support → Δημιουργία pairing</strong>, με Installation reference <code>{esc(policy.get('installation_id'))}</code>. Ο κωδικός χρησιμοποιείται μία φορά και δεν αποθηκεύεται εδώ.</p>
+{activation_note}
 <form method="post" action="pair" autocomplete="off">
 <input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
 <label for="pairing_code">One-time pairing code</label>
 <input id="pairing_code" name="pairing_code" type="text" inputmode="text" maxlength="100" placeholder="SPM-XXXX-XXXX-XXXX-XXXX" required autocomplete="off"{disabled}>
-<button type="submit" disabled{disabled}>Ενεργοποίηση Managed identity</button>
+<button type="submit"{disabled}>Ενεργοποίηση Managed identity</button>
 </form>
 </section>'''
 
@@ -5532,6 +5539,16 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </form>
 </section>"""
 
+
+    plabel = "Δεν υπάρχει ενεργή Managed identity"
+    phealth = "—"
+    preason = "—"
+    please = "—"
+    prenewals = "0"
+    preconnects = "0"
+    plabel_node = mesh_identity_status.get('agent_label') or "—"
+    unattended_enabled = False
+    unattended_text = "DISABLED"
 
     if identity is not None:
         pcurrent = (
@@ -5919,30 +5936,199 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         legacy_locked_note = '<div class="notice notice-info">Legacy diagnostic continuity: τα προηγούμενα diagnostic/status panels παραμένουν ορατά. Οι legacy ενέργειες είναι κλειδωμένες όσο ισχύει το bounded first-device execution checkpoint.</div>'
         enrollment_html = legacy_locked_note + enrollment_html
 
-    return f"""<!doctype html>
-<html lang="el"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Smart Pro Managed Support</title>
-<style>
-:root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;background:#10151d;color:#eef5ff;font:14px/1.5 Arial,Helvetica,sans-serif}}main{{max-width:1000px;margin:0 auto;padding:24px}}.hero{{background:#172231;border:1px solid #2c4158;border-radius:16px;padding:22px;margin-bottom:16px}}h1{{margin:0 0 5px;font-size:27px}}h2{{margin:0 0 10px;font-size:18px}}.sub{{color:#aab9ca}}.badge{{display:inline-block;margin-top:14px;padding:8px 12px;border-radius:999px;font-weight:700}}.ok{{background:#173a2a;color:#9ff0bd;border:1px solid #2c7750}}.bad{{background:#442128;color:#ffb5c0;border:1px solid #8c3d4d}}.warn{{background:#43381a;color:#ffe49a;border:1px solid #8b7331}}.note{{margin-top:15px;padding:13px 15px;border-radius:10px;background:#12293a;border:1px solid #245473;color:#cfeeff}}.notice{{margin:0 0 16px;padding:12px 14px;border-radius:10px}}.notice-ok{{background:#173a2a;border:1px solid #2c7750;color:#bdf7d0}}.notice-bad{{background:#442128;border:1px solid #8c3d4d;color:#ffd0d6}}.notice-info{{background:#12293a;border:1px solid #245473;color:#cfeeff}}.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.card,.pairbox{{background:#171d26;border:1px solid #293646;border-radius:12px;padding:15px}}.k{{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:#8fa1b5}}.v{{font-size:15px;font-weight:700;margin-top:4px;overflow-wrap:anywhere}}.pairbox{{margin:16px 0}}.pairbox p{{color:#b7c5d5}}label{{display:block;font-weight:700;margin:12px 0 6px}}input{{width:100%;max-width:460px;padding:11px 12px;border-radius:8px;border:1px solid #3b4c60;background:#0f151d;color:#fff;font:inherit}}button{{display:block;margin-top:12px;border:0;border-radius:8px;padding:10px 14px;background:#19aee8;color:#06131b;font-weight:800;cursor:pointer}}button:disabled,input:disabled{{opacity:.5;cursor:not-allowed}}code{{color:#9fdfff}}.mini-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.mini-grid div{{background:#111821;border:1px solid #28384a;border-radius:9px;padding:10px}}.mini-grid span{{display:block;color:#8fa1b5;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}}.mini-grid strong{{overflow-wrap:anywhere}}.footer{{margin-top:18px;color:#7f91a6;font-size:12px}}@media(max-width:650px){{main{{padding:14px}}.grid,.mini-grid{{grid-template-columns:1fr}}}}
-</style></head><body><main>
-<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.17.7 · First-Device Target Binding Continuity · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
-{notice_html}
-{pair_html}
-{enrollment_html}
-{first_device_settings_html}
-{first_device_execution_html}
-{settings_html}
-{agent_html}
-{runtime_html}
-{canary_html}
-{persistent_html}
-{migration_preflight_html}
-{migration_target_settings_html}
-{migration_canary_html}
-{identity_reseed_html}
-{candidate_reconnect_html}
-{promotion_html}
-<section class="grid">
+    def annotate_tool(card_html, mode, when, prerequisites, rerun, meaning):
+        if not card_html:
+            return ""
+        guide = f'''<div class="tool-guide">
+<div><span>Τύπος / επίδραση</span><strong>{esc(mode)}</strong></div>
+<div><span>Πότε χρησιμοποιείται</span><strong>{esc(when)}</strong></div>
+<div><span>Προϋποθέσεις</span><strong>{esc(prerequisites)}</strong></div>
+<div><span>Επανάληψη</span><strong>{esc(rerun)}</strong></div>
+<div class="tool-guide-wide"><span>Τι σημαίνει το αποτέλεσμα</span><strong>{esc(meaning)}</strong></div>
+</div>'''
+        return card_html.replace('</h2>', '</h2>' + guide, 1)
+
+    def freeze_archived_actions(card_html):
+        if not card_html:
+            return ""
+        # UI-only safety layer. The 3.18.0 server-side POST gate remains authoritative.
+        return re.sub(r'<button type="submit"(?![^>]*\bdisabled\b)', '<button type="submit" disabled', card_html)
+
+    def archived_tool(card_html, mode, when, prerequisites, rerun, meaning):
+        if not card_html:
+            return ""
+        documented = annotate_tool(card_html, mode, when, prerequisites, rerun, meaning)
+        locked = freeze_archived_actions(documented)
+        return locked.replace('</h2>', '</h2><div class="tool-lock">Αρχειοθετημένο εργαλείο: η κατάσταση και η τεκμηρίωση διατηρούνται, αλλά η εκτέλεση είναι κλειδωμένη στην 3.18.0. Επανενεργοποίηση μόνο σε ελεγχόμενο maintenance checkpoint.</div>', 1)
+
+    def collapsible(title, subtitle, body, count_label):
+        if not body.strip():
+            return ""
+        return f'''<details class="tool-section">
+<summary><span>{esc(title)}</span><small>{esc(count_label)}</small></summary>
+<div class="section-intro">{esc(subtitle)}</div>
+<div class="section-body">{body}</div>
+</details>'''
+
+    enrollment_html = archived_tool(
+        enrollment_html,
+        "Verification-only / ephemeral one-time authorization ticket",
+        "Όταν η Broker authorization ή το enrollment contract φαίνεται ασυνεπές.",
+        "Paired Managed identity, local policy ALLOWED και έγκυρο server authorization.",
+        "Κλειδωμένο στην 3.18.0. Επανεκτέλεση μόνο σε maintenance build.",
+        "VERIFIED = το enrollment contract είναι έγκυρο. FAILED = δεν συνεχίζουμε σε runtime· ελέγχουμε Broker και logs.",
+    )
+    settings_html = archived_tool(
+        settings_html,
+        "Verification-only / raw .msh memory-only",
+        "Για έλεγχο ότι το secure settings contract αντιστοιχεί στη σωστή εγκατάσταση και identity.",
+        "Έγκυρο enrollment authorization και paired identity.",
+        "Κλειδωμένο στην 3.18.0. Δεν γίνεται blind retry one-time consume.",
+        "VERIFIED = format/integrity/source συμφωνούν. FAILED = stop/fail-closed και έλεγχος contract.",
+    )
+    agent_html = archived_tool(
+        agent_html,
+        "Verification-only / binary downloaded προσωρινά, ποτέ execution",
+        "Για διάγνωση architecture, SHA, ELF και εγκεκριμένου MeshAgent binary.",
+        "Verified settings chain και σωστό architecture.",
+        "Κλειδωμένο στην 3.18.0. Χρήση μόνο με ρητό maintenance scope.",
+        "VERIFIED = binary integrity/architecture σωστά. FAILED = δεν επιτρέπεται execution.",
+    )
+    runtime_html = archived_tool(
+        runtime_html,
+        "Verification-only / short runtime lease + μία renewal / no MeshAgent",
+        "Για διάγνωση του lease contract χωρίς πραγματική MeshCentral εκτέλεση.",
+        "Verified authorization/settings/agent chain.",
+        "Κλειδωμένο στην 3.18.0. Δεν απαιτείται για καθημερινή λειτουργία.",
+        "Renewed once = το lease pipeline λειτουργεί. Failure = ελέγχουμε authorization/gateway πριν από runtime.",
+    )
+    canary_html = archived_tool(
+        canary_html,
+        "Controlled foreground execution ≤45s / identity continuity",
+        "Μόνο όταν χρειάζεται να αποδειχθεί ξανά ότι χρησιμοποιείται η ίδια MeshCentral identity.",
+        "Verified chain, stable identity και ρητό maintenance approval.",
+        "Κλειδωμένο στην 3.18.0. Όχι επανάληψη ως routine test.",
+        "VERIFIED = ίδια identity/node και cleanup σωστό. FAILED = δεν κάνουμε νέο canary πριν διαβάσουμε logs/state.",
+    )
+    migration_preflight_html = archived_tool(
+        migration_preflight_html,
+        "Read-only authenticated preflight / no node move",
+        "Για έλεγχο per-installation target group/controller binding πριν από migration/recovery εργασία.",
+        "Paired identity, valid authorization και υπάρχον stable node.",
+        "Κλειδωμένο στην 3.18.0. Μπορεί να επανενεργοποιηθεί μελλοντικά ως ασφαλές diagnostic.",
+        "VERIFIED = profile/group/controller/identity συμφωνούν. FAILED = δεν επιτρέπεται migration action.",
+    )
+    migration_target_settings_html = archived_tool(
+        migration_target_settings_html,
+        "Verification-only / target .msh memory-only / no execution",
+        "Για επιβεβαίωση του exact per-installation target configuration.",
+        "Verified migration preflight και server authorization.",
+        "Κλειδωμένο στην 3.18.0. One-time material δεν καταναλώνεται ξανά χωρίς σχεδιασμό.",
+        "VERIFIED = target settings αντιστοιχούν στην εγκατάσταση. FAILED = σταματάμε πριν από runtime source change.",
+    )
+    migration_canary_html = archived_tool(
+        migration_canary_html,
+        "Controlled migration execution / προσωρινό runtime-source switch",
+        "Μόνο για ειδική διερεύνηση migration continuity με παρακολούθηση MeshCentral.",
+        "Verified target settings, stable identity και explicit maintenance checkpoint.",
+        "Κλειδωμένο στην 3.18.0. Δεν είναι routine diagnostic και δεν γίνεται blind rerun.",
+        "PASS = ίδια stable συσκευή εμφανίζεται στον target χώρο και επιστρέφει σωστά. Failure = stop και forensic review.",
+    )
+    identity_reseed_html = archived_tool(
+        identity_reseed_html,
+        "State-changing / δημιουργεί quarantined candidate identity",
+        "Μόνο για recovery όταν υπάρχει τεκμηριωμένη ανάγκη νέας candidate identity.",
+        "Verified target chain, backup/rollback plan και ρητή τεχνική έγκριση.",
+        "Κλειδωμένο στην 3.18.0. One-shot style workflow — ποτέ αυθόρμητη επανάληψη.",
+        "VERIFIED = candidate δημιουργήθηκε χωρίς να χαθεί η παλιά identity. FAILED = διατηρούμε rollback και δεν προωθούμε candidate.",
+    )
+    candidate_reconnect_html = archived_tool(
+        candidate_reconnect_html,
+        "Controlled execution / reconnect υπάρχουσας quarantined candidate",
+        "Για να αποδειχθεί ότι η ίδια candidate επανασυνδέεται χωρίς duplicate node.",
+        "Υπάρχουσα verified candidate και intact shared rollback identity.",
+        "Κλειδωμένο στην 3.18.0. Χρήση μόνο πριν από ειδικά σχεδιασμένη promotion/recovery εργασία.",
+        "VERIFIED = ίδια candidate online, χωρίς νέα συσκευή. FAILED = δεν προχωρά permanent promotion.",
+    )
+    promotion_html = archived_tool(
+        promotion_html,
+        "High-impact state change / permanent local identity promotion",
+        "Μόνο όταν υπάρχει verified candidate και έχει εγκριθεί permanent target runtime promotion.",
+        "Verified reconnect proof, rollback backup και ρητή τεχνική απόφαση.",
+        "Κλειδωμένο στην 3.18.0. Ποτέ ως diagnostic retry.",
+        "PASS = target identity γίνεται stable και rollback παραμένει διαθέσιμο. Failure = αποκατάσταση rollback και πλήρης έλεγχος logs.",
+    )
+    first_device_settings_html = archived_tool(
+        first_device_settings_html,
+        "Historical one-time first-device settings verification",
+        "Μόνο για forensic αναφορά του αρχικού ID-34973 first-device provisioning checkpoint.",
+        "Exact historical scope ID-34973 / amd64.",
+        "Ολοκληρωμένο checkpoint — δεν επαναλαμβάνεται στην 3.18.0.",
+        "VERIFIED = το αρχικό Portal-bound .msh contract είχε επιβεβαιωθεί χωρίς execution.",
+    )
+    first_device_execution_html = archived_tool(
+        first_device_execution_html,
+        "Historical controlled reset + bounded first-device execution",
+        "Μόνο για forensic αναφορά του 3.17.4 retry/reset + first-device PASS.",
+        "Exact historical Broker arm/reset proof και zero-device gate.",
+        "Ολοκληρωμένο one-shot checkpoint — NEVER blind rerun.",
+        "first_device_verified = το bounded canary δημιούργησε ακριβώς μία σωστή συσκευή και η identity αποθηκεύτηκε.",
+    )
+
+    if identity is None:
+        next_action = "Η 3.18.0 δεν ανοίγει νέα Managed identity. Η customer/Portal activation flow θα σχεδιαστεί ως ξεχωριστό επόμενο έργο."
+    elif not local_allowed:
+        next_action = "Ελέγξτε πρώτα την local policy / subscription κατάσταση. Το runtime παραμένει fail-closed."
+    elif not server_allowed:
+        next_action = "Ελέγξτε Broker/server authorization και heartbeat. Μην τρέξετε ιστορικό diagnostic action."
+    elif pstatus in {'preparing', 'starting', 'running', 'reconnecting'} or PERSISTENT_WORKER_ACTIVE:
+        next_action = "Καμία ενέργεια απαιτείται. Παρακολουθήστε health/lease μόνο αν υπάρχει πραγματικό σύμπτωμα ή incident."
+    elif unattended_enabled:
+        next_action = "Το unattended mode είναι ενεργό. Περιμένετε την αυτόματη recovery προσπάθεια πριν από οποιαδήποτε χειροκίνητη ενέργεια."
+    else:
+        next_action = "Αν χρειάζεται συνεχής Managed σύνδεση, χρησιμοποιήστε μόνο την ενεργή κάρτα Unattended Managed runtime."
+
+    current_state_html = f'''<section class="current-state">
+<div class="section-heading"><div><div class="eyebrow">Τρέχουσα κατάσταση</div><h2>Operational snapshot</h2></div><div class="version-chip">v{esc(VERSION)} · {esc(ARCH)}</div></div>
+<div class="status-grid">
+<div class="card"><div class="k">Installation ID</div><div class="v">{esc(policy.get('installation_id') or (identity or {}).get('installation_id'))}</div></div>
+<div class="card"><div class="k">Authorization chain</div><div class="v">{esc(overall_text)}</div></div>
+<div class="card"><div class="k">Runtime</div><div class="v">{esc(plabel)}</div></div>
+<div class="card"><div class="k">Health / reason</div><div class="v">{esc(phealth)} · {esc(preason)}</div></div>
+<div class="card"><div class="k">Unattended</div><div class="v">{esc(unattended_text)}</div></div>
+<div class="card"><div class="k">Lease renewals / reconnects</div><div class="v">{esc(prenewals)} / {esc(preconnects)}</div></div>
+<div class="card"><div class="k">Expected stable node</div><div class="v">{esc(plabel_node)}</div></div>
+<div class="card"><div class="k">Technician actions</div><div class="v">NOT AUTHORIZED</div></div>
+</div>
+<div class="next-action"><span>Επόμενη ενέργεια</span><strong>{esc(next_action)}</strong></div>
+</section>'''
+
+    diagnostics_section = collapsible(
+        "Διαγνωστικά εργαλεία αλυσίδας",
+        "Διατηρούνται για μελλοντικό troubleshooting authorization, settings, agent και lease. Στην 3.18.0 είναι αρχειοθετημένα και δεν εκτελούνται.",
+        enrollment_html + settings_html + agent_html + runtime_html,
+        "4 εργαλεία · collapsed",
+    )
+    identity_section = collapsible(
+        "Identity & connectivity diagnostics",
+        "Παλαιότερα bounded εργαλεία που εκτελούσαν controlled MeshAgent canary για απόδειξη identity continuity.",
+        canary_html,
+        "1 εργαλείο · controlled execution · collapsed",
+    )
+    recovery_section = collapsible(
+        "Provisioning / Migration / Recovery",
+        "Advanced εργαλεία για per-installation target verification, migration, candidate recovery και promotion. Διατηρούνται ως τεχνικό αρχείο και μελλοντική εργαλειοθήκη.",
+        migration_preflight_html + migration_target_settings_html + migration_canary_html + identity_reseed_html + candidate_reconnect_html + promotion_html,
+        "6 εργαλεία · advanced · collapsed",
+    )
+    history_section = collapsible(
+        "Ολοκληρωμένα first-device checkpoints",
+        "Ιστορικό των one-time Portal-bound / retry-reset / bounded execution checkpoints που οδήγησαν στο verified stable node. Δεν επαναλαμβάνονται.",
+        first_device_settings_html + first_device_execution_html,
+        "2 ιστορικά checkpoints · collapsed",
+    )
+
+    detailed_state_html = f'''<section class="grid">
 <div class="card"><div class="k">Installation ID</div><div class="v">{esc(policy.get('installation_id') or (identity or {}).get('installation_id'))}</div></div>
 <div class="card"><div class="k">Smart Pro Tools</div><div class="v">v{esc((policy.get('source') or {}).get('addon_version'))} · Online: {esc(tools_online)}</div></div>
 <div class="card"><div class="k">Portal pairing (local policy)</div><div class="v">{esc(portal_paired_local)}</div></div>
@@ -5956,13 +6142,37 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <div class="card"><div class="k">Authorization chain</div><div class="v">{esc(overall_text)}</div></div>
 <div class="card"><div class="k">MeshCentral stable identity</div><div class="v">{esc(mesh_identity_label)} · generation {esc(mesh_identity_generation)} · runs {esc(mesh_identity_runs)} · DB {esc(mesh_identity_db_hint)} · {esc(mesh_identity_updated)}</div></div>
 <div class="card"><div class="k">Remote access</div><div class="v">Όχι — το node μπορεί να είναι online, αλλά web/Terminal/Files technician actions παραμένουν NOT AUTHORIZED</div></div>
-</section>
-<div class="footer">3.17.7 first-device target-binding continuity. Preserves the verified stable identity and unattended lifecycle while reconciling the first-device and legacy migration MeshID hint namespaces; technician actions remain NOT AUTHORIZED.</div>
-</main></body></html>"""
+</section>'''
+    detail_section = collapsible(
+        "Λεπτομερής κατάσταση / Policy & Authorization",
+        "Η πλήρης παλιά status grid παραμένει διαθέσιμη για troubleshooting χωρίς να καταλαμβάνει μόνιμα χώρο στην καθημερινή οθόνη.",
+        detailed_state_html,
+        "13 status fields · collapsed",
+    )
+
+    return f'''<!doctype html>
+<html lang="el"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Smart Pro Managed Support</title>
+<style>
+:root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;background:#10151d;color:#eef5ff;font:14px/1.5 Arial,Helvetica,sans-serif}}main{{max-width:1040px;margin:0 auto;padding:24px}}.hero{{background:#172231;border:1px solid #2c4158;border-radius:16px;padding:22px;margin-bottom:16px}}h1{{margin:0 0 5px;font-size:27px}}h2{{margin:0 0 10px;font-size:18px}}.sub{{color:#aab9ca}}.badge{{display:inline-block;margin-top:14px;padding:8px 12px;border-radius:999px;font-weight:700}}.ok{{background:#173a2a;color:#9ff0bd;border:1px solid #2c7750}}.bad{{background:#442128;color:#ffb5c0;border:1px solid #8c3d4d}}.warn{{background:#43381a;color:#ffe49a;border:1px solid #8b7331}}.note{{margin-top:15px;padding:13px 15px;border-radius:10px;background:#12293a;border:1px solid #245473;color:#cfeeff}}.notice{{margin:0 0 16px;padding:12px 14px;border-radius:10px}}.notice-ok{{background:#173a2a;border:1px solid #2c7750;color:#bdf7d0}}.notice-bad{{background:#442128;border:1px solid #8c3d4d;color:#ffd0d6}}.notice-info{{background:#12293a;border:1px solid #245473;color:#cfeeff}}.grid,.status-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.card,.pairbox,.current-state{{background:#171d26;border:1px solid #293646;border-radius:12px;padding:15px}}.current-state{{margin:16px 0;padding:18px}}.section-heading{{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px}}.eyebrow{{font-size:11px;text-transform:uppercase;letter-spacing:.75px;color:#8fa1b5;margin-bottom:3px}}.version-chip{{white-space:nowrap;padding:6px 9px;border-radius:999px;background:#111821;border:1px solid #304258;color:#b8c9da;font-size:12px}}.k{{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:#8fa1b5}}.v{{font-size:15px;font-weight:700;margin-top:4px;overflow-wrap:anywhere}}.pairbox{{margin:14px 0}}.operational-card{{border-color:#2c7750;box-shadow:0 0 0 1px rgba(44,119,80,.12)}}.pairbox p{{color:#b7c5d5}}label{{display:block;font-weight:700;margin:12px 0 6px}}input{{width:100%;max-width:460px;padding:11px 12px;border-radius:8px;border:1px solid #3b4c60;background:#0f151d;color:#fff;font:inherit}}button{{display:block;margin-top:12px;border:0;border-radius:8px;padding:10px 14px;background:#19aee8;color:#06131b;font-weight:800;cursor:pointer}}button:disabled,input:disabled{{opacity:.5;cursor:not-allowed}}code{{color:#9fdfff}}.mini-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.mini-grid div{{background:#111821;border:1px solid #28384a;border-radius:9px;padding:10px}}.mini-grid span{{display:block;color:#8fa1b5;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}}.mini-grid strong{{overflow-wrap:anywhere}}.next-action{{margin-top:14px;padding:12px 14px;border-radius:10px;background:#12293a;border:1px solid #245473}}.next-action span{{display:block;color:#8fa1b5;font-size:11px;text-transform:uppercase;letter-spacing:.6px;margin-bottom:4px}}.tool-section{{margin:14px 0;border:1px solid #293646;border-radius:12px;background:#141b24;overflow:hidden}}.tool-section>summary{{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:15px 16px;cursor:pointer;font-weight:800;list-style:none}}.tool-section>summary::-webkit-details-marker{{display:none}}.tool-section>summary:after{{content:'＋';font-size:18px;color:#8fa1b5}}.tool-section[open]>summary:after{{content:'−'}}.tool-section>summary small{{margin-left:auto;color:#8fa1b5;font-weight:600;font-size:11px}}.section-intro{{padding:0 16px 14px;color:#9eb0c4;border-bottom:1px solid #253444}}.section-body{{padding:2px 14px 14px}}.tool-guide{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:10px 0 12px;padding:10px;border-radius:9px;background:#101720;border:1px solid #27384a}}.tool-guide div{{min-width:0}}.tool-guide-wide{{grid-column:1/-1}}.tool-guide span{{display:block;color:#7f91a6;font-size:10px;text-transform:uppercase;letter-spacing:.55px;margin-bottom:2px}}.tool-guide strong{{display:block;color:#c8d5e3;font-size:12px;font-weight:650;overflow-wrap:anywhere}}.tool-lock{{margin:8px 0 12px;padding:9px 11px;border-radius:8px;background:#362f18;border:1px solid #6d5c26;color:#ffe49a;font-size:12px}}.archive-banner{{margin:16px 0;padding:12px 14px;border-radius:10px;background:#181f29;border:1px solid #34465a;color:#b8c7d7}}.footer{{margin-top:18px;color:#7f91a6;font-size:12px}}@media(max-width:650px){{main{{padding:14px}}.grid,.status-grid,.mini-grid,.tool-guide{{grid-template-columns:1fr}}.tool-guide-wide{{grid-column:auto}}.section-heading{{display:block}}.version-chip{{display:inline-block;margin-top:8px}}.tool-section>summary{{align-items:flex-start;flex-wrap:wrap}}.tool-section>summary small{{width:100%;margin:2px 0 0}}}}
+</style></head><body><main>
+<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.18.0 · UI Consolidation & Diagnostic Archive · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
+{notice_html}
+{current_state_html}
+{pair_html}
+<div class="archive-banner"><strong>3.18.0 UI-only consolidation:</strong> η ενεργή unattended λειτουργία παραμένει μπροστά. Όλα τα παλιά checkpoints και diagnostic states διατηρούνται σε αναδιπλούμενες ενότητες· οι ιστορικές actions είναι κλειδωμένες στην stable έκδοση.</div>
+{persistent_html.replace('class="pairbox"', 'class="pairbox operational-card"', 1) if persistent_html else ''}
+{diagnostics_section}
+{identity_section}
+{recovery_section}
+{history_section}
+{detail_section}
+<div class="footer">3.18.0 UI consolidation & diagnostic archive. Runtime, stable identity, renewable leases and fail-closed unattended lifecycle remain unchanged from the verified 3.17.7 baseline; historical actions are preserved as documented archive and locked in this stable build. Technician Web/Terminal/Files/Desktop actions remain NOT AUTHORIZED.</div>
+</main></body></html>'''
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SmartProManaged/3.17.7"
+    server_version = "SmartProManaged/3.18.0"
 
     def _send(self, code, body, content_type):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
@@ -6082,7 +6292,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(409, render_page(read_policy(), "Η 3.17.4 είναι κλειδωμένο controlled retry/reset checkpoint. Επιτρέπονται μόνο reset consume και αργότερα explicit armed first-device execution.", "bad"), "text/html; charset=utf-8")
             return
         if VERSION == CONTINUOUS_LIFECYCLE_VERSION and not (is_persistent_start or is_persistent_stop):
-            self._send(409, render_page(read_policy(), "Η 3.17.7 είναι κλειδωμένο continuous-runtime lifecycle checkpoint. Επιτρέπονται μόνο explicit unattended start/stop. Τα παλιά mutation/test actions παραμένουν ιστορικά και δεν επαναλαμβάνονται.", "bad"), "text/html; charset=utf-8")
+            self._send(409, render_page(read_policy(), "Η 3.18.0 είναι stable UI consolidation checkpoint. Επιτρέπονται μόνο explicit unattended start/stop. Τα παλιά mutation/test actions παραμένουν αρχειοθετημένα και δεν επαναλαμβάνονται.", "bad"), "text/html; charset=utf-8")
             return
         if PERSISTENT_WORKER_ACTIVE and not (is_persistent_stop or is_group_migration_preflight or is_group_migration_target_settings or is_group_migration_canary or is_group_identity_reseed_canary or is_candidate_reconnect_canary or is_candidate_promotion):
             self._send(409, render_page(read_policy(), "Η continuous Managed λειτουργία είναι ενεργή. Επιτρέπονται μόνο ασφαλής τερματισμός ή οι verification-only migration έλεγχοι.", "bad"), "text/html; charset=utf-8")
@@ -6332,7 +6542,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"[managed] Smart Pro Managed Support {VERSION} permanent candidate promotion consumer listening on {PORT}", flush=True)
+    print(f"[managed] Smart Pro Managed Support {VERSION} UI consolidation consumer listening on {PORT}", flush=True)
     boot_identity = get_mesh_identity_status(load_identity())
     boot_control = load_unattended_control()
     print(f"[managed] mesh identity state={boot_identity.get('state')} generation={boot_identity.get('generation', 0)} continuity_runs={boot_identity.get('continuity_runs', 0)}; unattended_enabled={str(bool(boot_control.get('enabled'))).lower()}", flush=True)
@@ -6342,7 +6552,7 @@ if __name__ == "__main__":
         unattended_thread = threading.Thread(target=unattended_supervisor, name="managed-unattended-supervisor", daemon=True)
         unattended_thread.start()
         if VERSION == CONTINUOUS_LIFECYCLE_VERSION:
-            print("[managed] 3.17.7 lifecycle checkpoint: unattended supervisor available; explicit start/stop only; stable identity reuse required; technician_actions=false", flush=True)
+            print("[managed] 3.18.0 UI consolidation checkpoint: unattended supervisor available; explicit start/stop only; stable identity reuse required; archived actions locked; technician_actions=false", flush=True)
     else:
         print("[managed] 3.17.4 checkpoint lock: unattended supervisor NOT started; controlled retry reset requires explicit UI consume; execution still requires later Broker arm + UI action", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

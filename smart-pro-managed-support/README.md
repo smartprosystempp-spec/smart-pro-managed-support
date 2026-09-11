@@ -1,11 +1,16 @@
-# Smart Pro Managed Support 3.17.7
+# Smart Pro Managed Support 3.18.0
 
-First-device target-binding compatibility hotfix for the hard-pinned ID-34973 QA installation.
+UI consolidation and documented diagnostic archive built directly on the live-verified 3.17.7 lifecycle baseline.
 
-The verified 3.17.4 first-device identity stores the provisioning MeshCentral mesh-id hint (16 hex), while the older per-installation target-settings path exposes a separate .msh MeshID hint (12 hex). 3.17.7 stops treating those different hint namespaces as the same value for this narrowly identified first-device identity.
+## What changes
+- A compact **Current state / Next action** snapshot is shown first.
+- The active **Unattended Managed runtime** card remains visible and operational.
+- Historical diagnostics, first-device checkpoints and migration/recovery tooling are preserved in collapsible sections instead of a permanent wall of cards.
+- Every archived tool explains its impact, intended use, prerequisites, rerun policy and how to interpret success/failure.
+- Historical mutation/test buttons are visibly locked in 3.18.0; the server-side gate also accepts only explicit unattended start/stop.
+- The old technical pairing form is retained only as reference when no identity exists, but is locked pending the separate Customer Portal onboarding/activation flow.
 
-Security remains fail-closed: the target source fingerprint must still match, and before any MeshAgent execution the full persisted identity binding SHA-256 over MeshName, MeshType, MeshID, ServerID, MeshServer and agentName must match exactly. No re-pair, reseed, new node, permission mutation, MeshAgent `-install`, service/systemd persistence, or technician Web/Terminal/Files/Desktop authorization is added.
+## What does not change
+The verified 3.17.7 stable identity, target-binding continuity, renewable runtime leases, unattended restart recovery and fail-closed behavior are unchanged. No re-pair, reseed, new node, MeshCentral permission mutation, MeshAgent `-install`, service/systemd persistence, or technician Web/Terminal/Files/Desktop authorization is added.
 
-
-## 3.17.7 live finding / fix
-After the first successful 3.17.6 target runtime, the stable identity metadata correctly hydrated the target binding/source hints. A later manual re-enable then stopped at `persistent_target_binding_changed` because the 3.17.6 compatibility classifier incorrectly depended on those hints still being empty. 3.17.7 recognizes the already-proven Portal-bound first-device identity by its durable 16-hex provisioning mesh hint and continues to compare every other target/source hint plus the full persisted `.msh` binding SHA-256. No re-pair, reseed, Arm, or Broker mutation is introduced.
+This release intentionally does **not** add a second diagnostic ZIP exporter. Home Assistant add-on logs remain the primary client-side incident artifact; a lightweight support snapshot can be reconsidered later if real support cases justify it.
