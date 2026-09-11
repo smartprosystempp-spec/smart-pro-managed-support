@@ -21,7 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.17.3")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.17.4")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -97,7 +97,7 @@ FINGERPRINT_HINT_RE = re.compile(r"^[a-f0-9]{12}$")
 FIRST_DEVICE_MESH_HINT_RE = re.compile(r"^[a-f0-9]{16}$")
 FIRST_DEVICE_INSTALLATION = "ID-34973"
 FIRST_DEVICE_GROUP = "Smart Pro Managed — ID-34973"
-FIRST_DEVICE_EXECUTION_VERSION = "3.17.3"
+FIRST_DEVICE_EXECUTION_VERSION = "3.17.4"
 FIRST_DEVICE_EXECUTION_MAX_RUNTIME = 75
 FIRST_DEVICE_EXECUTION_SHUTDOWN_GRACE = 3
 MIN_AGENT_BYTES = 100000
@@ -1141,11 +1141,11 @@ def load_first_device_retry_reset_state():
 
 
 def consume_first_device_retry_reset():
-    """Consume Broker 0.56 reset generation 1; never arm or execute MeshAgent."""
+    """Consume Broker 0.56.1 reset generation 1; never arm or execute MeshAgent."""
     identity=load_identity()
     if identity is None: raise RuntimeError('first_device_retry_reset_not_paired|Απαιτείται ενεργή Managed identity.')
-    if VERSION!='3.17.3' or ARCH!='amd64' or identity.get('installation_id')!=FIRST_DEVICE_INSTALLATION:
-        raise RuntimeError('first_device_retry_reset_scope|Το controlled retry reset επιτρέπεται μόνο στο exact ID-34973 / 3.17.3 / amd64.')
+    if VERSION!='3.17.4' or ARCH!='amd64' or identity.get('installation_id')!=FIRST_DEVICE_INSTALLATION:
+        raise RuntimeError('first_device_retry_reset_scope|Το controlled retry reset επιτρέπεται μόνο στο exact ID-34973 / 3.17.4 / amd64.')
     if FIRST_DEVICE_EXECUTION_WORKER_ACTIVE: raise RuntimeError('first_device_retry_reset_execution_active|Δεν επιτρέπεται reset όσο υπάρχει execution worker.')
     if not read_policy().get('allowed_local'): raise RuntimeError('first_device_retry_reset_local_policy|Η τοπική Managed πολιτική δεν επιτρέπει controlled retry reset.')
     server=get_server_state(); until=_as_int(server.get('valid_until')) or 0
@@ -1154,15 +1154,15 @@ def consume_first_device_retry_reset():
     if existing.get('status')=='consumed' and existing.get('retry_generation')==1 and existing.get('node_id')==identity['node_id']: return existing
     prior=load_first_device_execution_state()
     if not (prior.get('status')=='failed' and prior.get('installation_id')==FIRST_DEVICE_INSTALLATION and prior.get('node_id')==identity['node_id']
-            and prior.get('client_version')=='3.17.2' and prior.get('architecture')=='amd64'):
-        raise RuntimeError('first_device_retry_reset_prior_state|Λείπει το exact local failed 3.17.2 proof. Δεν γίνεται reset από ασαφή κατάσταση.')
+            and prior.get('client_version')=='3.17.1' and prior.get('architecture')=='amd64'):
+        raise RuntimeError('first_device_retry_reset_prior_state|Λείπει το exact local failed 3.17.1 proof. Δεν γίνεται reset από ασαφή κατάσταση.')
     payload={'node_id':identity['node_id'],'node_secret':identity['node_secret'],'client_version':VERSION,'architecture':ARCH}
     try:
         res=broker_post('/managed/first-device/execution/retry-reset/consume',payload)
         ok=(res.get('success') is True and res.get('phase')=='portal_bound_first_device_execution_retry_reset_consume'
             and res.get('contract_id')=='smart-pro-first-device-retry-reset-v1' and _as_int(res.get('schema_version'))==1
             and res.get('reset_consumed') is True and _as_int(res.get('retry_generation'))==1
-            and _safe_str(res.get('installation_ref'),100).upper()==FIRST_DEVICE_INSTALLATION and _safe_str(res.get('client_version'),30)=='3.17.3'
+            and _safe_str(res.get('installation_ref'),100).upper()==FIRST_DEVICE_INSTALLATION and _safe_str(res.get('client_version'),30)=='3.17.4'
             and _as_int(res.get('device_count'))==0 and res.get('execution_armed') is False and res.get('execution_authorized') is False
             and res.get('device_enrollment_authorized') is False and res.get('technician_actions_authorized') is False)
         if not ok: raise RuntimeError('first_device_retry_reset_contract|Ο Broker επέστρεψε μη έγκυρο controlled retry reset contract.')
@@ -1285,10 +1285,10 @@ def first_device_execution_worker():
     try:
         if identity is None: raise RuntimeError('first_device_execution_not_paired|Απαιτείται ενεργή Managed identity.')
         if VERSION != FIRST_DEVICE_EXECUTION_VERSION or ARCH != 'amd64' or identity.get('installation_id') != FIRST_DEVICE_INSTALLATION:
-            raise RuntimeError('first_device_execution_scope|Το bounded first-device canary επιτρέπεται μόνο στο exact ID-34973 / 3.17.3 / amd64.')
+            raise RuntimeError('first_device_execution_scope|Το bounded first-device canary επιτρέπεται μόνο στο exact ID-34973 / 3.17.4 / amd64.')
         reset=load_first_device_retry_reset_state()
         if not (reset.get('status')=='consumed' and reset.get('retry_generation')==1 and reset.get('installation_id')==FIRST_DEVICE_INSTALLATION
-                and reset.get('node_id')==identity['node_id'] and reset.get('client_version')=='3.17.3' and reset.get('architecture')=='amd64'):
+                and reset.get('node_id')==identity['node_id'] and reset.get('client_version')=='3.17.4' and reset.get('architecture')=='amd64'):
             raise RuntimeError('first_device_execution_retry_reset_required|Απαιτείται πρώτα successful controlled retry reset consume generation 1.')
         if not read_policy().get('allowed_local'):
             raise RuntimeError('first_device_execution_local_policy|Η τοπική Managed πολιτική δεν επιτρέπει το first-device canary.')
@@ -5288,14 +5288,14 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         reset_consumed = bool(reset_current and first_device_retry_reset_state.get('status')=='consumed' and first_device_retry_reset_state.get('retry_generation')==1)
         reset_label = 'CONSUMED — GENERATION 1 / EXECUTION STILL DISARMED' if reset_consumed else ('FAILED — REVIEW / SAFE BROKER RECONCILIATION AVAILABLE' if reset_current and first_device_retry_reset_state.get('status')=='failed' else 'AUTHORIZED SERVER-SIDE — WAITING FOR CLIENT CONSUME')
         reset_time = fmt_epoch(first_device_retry_reset_state.get('consumed_at')) if reset_consumed else '—'
-        reset_disabled = ' disabled' if (not overall or VERSION!='3.17.3' or ARCH!='amd64' or identity['installation_id']!=FIRST_DEVICE_INSTALLATION or reset_consumed or FIRST_DEVICE_EXECUTION_WORKER_ACTIVE) else ''
+        reset_disabled = ' disabled' if (not overall or VERSION!='3.17.4' or ARCH!='amd64' or identity['installation_id']!=FIRST_DEVICE_INSTALLATION or reset_consumed or FIRST_DEVICE_EXECUTION_WORKER_ACTIVE) else ''
         fdx_scope_ok = identity['installation_id'] == FIRST_DEVICE_INSTALLATION and VERSION == FIRST_DEVICE_EXECUTION_VERSION and ARCH == 'amd64'
         fdx_disabled = ' disabled' if (not overall or not fdx_scope_ok or not reset_consumed or FIRST_DEVICE_EXECUTION_WORKER_ACTIVE or fdx_status in {'preparing','running','reported','failed'}
             or PERSISTENT_WORKER_ACTIVE or CANARY_WORKER_ACTIVE or MIGRATION_CANARY_WORKER_ACTIVE or IDENTITY_RESEED_WORKER_ACTIVE or CANDIDATE_RECONNECT_WORKER_ACTIVE or PROMOTION_WORKER_ACTIVE) else ''
         first_device_execution_html = f"""
 <section class="pairbox">
-<h2>Controlled first-device retry reset — 3.17.3</h2>
-<p>Η 3.17.3 καταναλώνει <strong>μία φορά</strong> το admin-authorized Broker 0.56 reset generation 1. Η ενέργεια κάνει authenticated 0-device recheck και καθαρίζει μόνο το retryable execution-attempt state. <strong>Δεν κάνει Arm, δεν παραδίδει MeshAgent και δεν εκτελεί τίποτα.</strong></p>
+<h2>Controlled first-device retry reset — 3.17.4</h2>
+<p>Η 3.17.4 καταναλώνει <strong>μία φορά</strong> το admin-authorized Broker 0.56.1 reset generation 1. Η ενέργεια κάνει authenticated 0-device recheck και καθαρίζει μόνο το retryable execution-attempt state. <strong>Δεν κάνει Arm, δεν παραδίδει MeshAgent και δεν εκτελεί τίποτα.</strong></p>
 <div class="mini-grid">
 <div><span>Retry reset</span><strong>{esc(reset_label)}</strong></div>
 <div><span>Retry generation</span><strong>{esc(str(first_device_retry_reset_state.get('retry_generation') or 0))}</strong></div>
@@ -5309,11 +5309,11 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </form>
 <hr>
 <h3>Bounded first-device execution — only after later Broker Arm</h3>
-<p>Μετά από successful reset consume, η ίδια 3.17.3 μπορεί να εκτελέσει το bounded foreground canary ≤75″ μόνο μετά από ξεχωριστό Broker admin arm. Δεν υπάρχει automatic arm ή automatic retry.</p>
+<p>Μετά από successful reset consume, η ίδια 3.17.4 μπορεί να εκτελέσει το bounded foreground canary ≤75″ μόνο μετά από ξεχωριστό Broker admin arm. Δεν υπάρχει automatic arm ή automatic retry.</p>
 <div class="mini-grid">
 <div><span>Κατάσταση</span><strong>{esc(fdx_label)}</strong></div>
 <div><span>Installation</span><strong>ID-34973 ONLY</strong></div>
-<div><span>Client / Arch</span><strong>3.17.3 / amd64</strong></div>
+<div><span>Client / Arch</span><strong>3.17.4 / amd64</strong></div>
 <div><span>Τελευταίο state</span><strong>{esc(fdx_time)}</strong></div>
 <div><span>Source fingerprint hint</span><strong>{esc(fdx_source)}</strong></div>
 <div><span>Immutable Mesh hint</span><strong>{esc(fdx_mesh)}</strong></div>
@@ -5885,10 +5885,10 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </section>"""
 
     if VERSION == FIRST_DEVICE_EXECUTION_VERSION:
-        # 3.17.2 UI continuity hotfix: keep all previously built diagnostic/status
+        # Legacy UI continuity: keep all previously built diagnostic/status
         # panels visible, but freeze every legacy mutation control. The server-side
         # POST guard below remains the authoritative safety boundary.
-        legacy_locked_note = '<div class="notice notice-info">3.17.2 UI continuity: τα προηγούμενα diagnostic/status panels παραμένουν ορατά. Οι legacy ενέργειες είναι κλειδωμένες όσο ισχύει το bounded first-device execution checkpoint.</div>'
+        legacy_locked_note = '<div class="notice notice-info">Legacy diagnostic continuity: τα προηγούμενα diagnostic/status panels παραμένουν ορατά. Οι legacy ενέργειες είναι κλειδωμένες όσο ισχύει το bounded first-device execution checkpoint.</div>'
         enrollment_html = legacy_locked_note + enrollment_html
 
     return f"""<!doctype html>
@@ -5897,7 +5897,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <style>
 :root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;background:#10151d;color:#eef5ff;font:14px/1.5 Arial,Helvetica,sans-serif}}main{{max-width:1000px;margin:0 auto;padding:24px}}.hero{{background:#172231;border:1px solid #2c4158;border-radius:16px;padding:22px;margin-bottom:16px}}h1{{margin:0 0 5px;font-size:27px}}h2{{margin:0 0 10px;font-size:18px}}.sub{{color:#aab9ca}}.badge{{display:inline-block;margin-top:14px;padding:8px 12px;border-radius:999px;font-weight:700}}.ok{{background:#173a2a;color:#9ff0bd;border:1px solid #2c7750}}.bad{{background:#442128;color:#ffb5c0;border:1px solid #8c3d4d}}.warn{{background:#43381a;color:#ffe49a;border:1px solid #8b7331}}.note{{margin-top:15px;padding:13px 15px;border-radius:10px;background:#12293a;border:1px solid #245473;color:#cfeeff}}.notice{{margin:0 0 16px;padding:12px 14px;border-radius:10px}}.notice-ok{{background:#173a2a;border:1px solid #2c7750;color:#bdf7d0}}.notice-bad{{background:#442128;border:1px solid #8c3d4d;color:#ffd0d6}}.notice-info{{background:#12293a;border:1px solid #245473;color:#cfeeff}}.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.card,.pairbox{{background:#171d26;border:1px solid #293646;border-radius:12px;padding:15px}}.k{{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:#8fa1b5}}.v{{font-size:15px;font-weight:700;margin-top:4px;overflow-wrap:anywhere}}.pairbox{{margin:16px 0}}.pairbox p{{color:#b7c5d5}}label{{display:block;font-weight:700;margin:12px 0 6px}}input{{width:100%;max-width:460px;padding:11px 12px;border-radius:8px;border:1px solid #3b4c60;background:#0f151d;color:#fff;font:inherit}}button{{display:block;margin-top:12px;border:0;border-radius:8px;padding:10px 14px;background:#19aee8;color:#06131b;font-weight:800;cursor:pointer}}button:disabled,input:disabled{{opacity:.5;cursor:not-allowed}}code{{color:#9fdfff}}.mini-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.mini-grid div{{background:#111821;border:1px solid #28384a;border-radius:9px;padding:10px}}.mini-grid span{{display:block;color:#8fa1b5;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}}.mini-grid strong{{overflow-wrap:anywhere}}.footer{{margin-top:18px;color:#7f91a6;font-size:12px}}@media(max-width:650px){{main{{padding:14px}}.grid,.mini-grid{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.17.2 · Portal-Bound Bounded First-Device Execution Canary · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
+<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.17.4 · Controlled Retry Reset + Bounded First-Device Execution · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
 {notice_html}
 {pair_html}
 {enrollment_html}
@@ -5929,12 +5929,12 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <div class="card"><div class="k">MeshCentral stable identity</div><div class="v">{esc(mesh_identity_label)} · generation {esc(mesh_identity_generation)} · runs {esc(mesh_identity_runs)} · DB {esc(mesh_identity_db_hint)} · {esc(mesh_identity_updated)}</div></div>
 <div class="card"><div class="k">Remote access</div><div class="v">Όχι — το node μπορεί να είναι online, αλλά web/Terminal/Files technician actions παραμένουν NOT AUTHORIZED</div></div>
 </section>
-<div class="footer">3.17.3 controlled retry-reset consumer + bounded first-device execution client. Hard-pinned ID-34973 / amd64. Reset consume = one-time / authenticated / 0-device verified / NO EXECUTION. Later canary still requires explicit Broker admin arm and stays foreground ≤75s, χωρίς -install/service persistence ή technician authorization.</div>
+<div class="footer">3.17.4 controlled retry-reset consumer + bounded first-device execution client. Hard-pinned ID-34973 / amd64. Reset consume = one-time / authenticated / 0-device verified / NO EXECUTION. Later canary still requires explicit Broker admin arm and stays foreground ≤75s, χωρίς -install/service persistence ή technician authorization.</div>
 </main></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SmartProManaged/3.17.2"
+    server_version = "SmartProManaged/3.17.4"
 
     def _send(self, code, body, content_type):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
@@ -6051,7 +6051,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(403, render_page(read_policy(), "Η φόρμα ενεργοποίησης έληξε. Ανανεώστε τη σελίδα.", "bad"), "text/html; charset=utf-8")
             return
         if VERSION == FIRST_DEVICE_EXECUTION_VERSION and not (is_first_device_execution or is_first_device_retry_reset):
-            self._send(409, render_page(read_policy(), "Η 3.17.3 είναι κλειδωμένο controlled retry/reset checkpoint. Επιτρέπονται μόνο reset consume και αργότερα explicit armed first-device execution.", "bad"), "text/html; charset=utf-8")
+            self._send(409, render_page(read_policy(), "Η 3.17.4 είναι κλειδωμένο controlled retry/reset checkpoint. Επιτρέπονται μόνο reset consume και αργότερα explicit armed first-device execution.", "bad"), "text/html; charset=utf-8")
             return
         if PERSISTENT_WORKER_ACTIVE and not (is_persistent_stop or is_group_migration_preflight or is_group_migration_target_settings or is_group_migration_canary or is_group_identity_reseed_canary or is_candidate_reconnect_canary or is_candidate_promotion):
             self._send(409, render_page(read_policy(), "Η continuous Managed λειτουργία είναι ενεργή. Επιτρέπονται μόνο ασφαλής τερματισμός ή οι verification-only migration έλεγχοι.", "bad"), "text/html; charset=utf-8")
@@ -6311,5 +6311,5 @@ if __name__ == "__main__":
         unattended_thread = threading.Thread(target=unattended_supervisor, name="managed-unattended-supervisor", daemon=True)
         unattended_thread.start()
     else:
-        print("[managed] 3.17.3 checkpoint lock: unattended supervisor NOT started; controlled retry reset requires explicit UI consume; execution still requires later Broker arm + UI action", flush=True)
+        print("[managed] 3.17.4 checkpoint lock: unattended supervisor NOT started; controlled retry reset requires explicit UI consume; execution still requires later Broker arm + UI action", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

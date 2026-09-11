@@ -1,6 +1,6 @@
 name: "Smart Pro Managed Support"
-description: "Diagnostic/reliability hotfix for the hard-pinned ID-34973 bounded first-device execution canary. Adds stage-level Broker transport diagnostics; no automatic retry, install/service, or technician access."
-version: "3.17.3"
+description: "Controlled retry-reset proof correction for ID-34973. Preserves the real failed 3.17.1 proof, consumes Broker 0.56.1 reset only by explicit UI action, and keeps execution disarmed until a later admin arm."
+version: "3.17.4"
 slug: "smart_pro_managed_support"
 arch:
   - amd64

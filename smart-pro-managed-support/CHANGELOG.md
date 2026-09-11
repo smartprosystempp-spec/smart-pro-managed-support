@@ -1,3 +1,11 @@
+# Changelog
+
+## 3.17.4 — Controlled Retry Proof Correction
+- Corrects the local reset-consume safety guard to require the actual preserved failed 3.17.1 execution proof.
+- Keeps Broker reset consume explicit/manual and execution DISARMED.
+- Updates UI/runtime labels to 3.17.4 while preserving prior diagnostic history.
+- Requires Broker 0.56.1 for exact 3.17.4 protocol compatibility.
+
 ## 3.17.3 — Controlled Retry Reset Consumer
 - Exact ID-34973/amd64 one-time Broker 0.56 retry reset consume.
 - No automatic arm, no MeshAgent execution, no technician actions.
