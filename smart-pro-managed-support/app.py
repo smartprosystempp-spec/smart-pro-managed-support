@@ -21,7 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.17.5")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.17.6")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -98,7 +98,7 @@ FIRST_DEVICE_MESH_HINT_RE = re.compile(r"^[a-f0-9]{16}$")
 FIRST_DEVICE_INSTALLATION = "ID-34973"
 FIRST_DEVICE_GROUP = "Smart Pro Managed — ID-34973"
 FIRST_DEVICE_EXECUTION_VERSION = "3.17.4"
-CONTINUOUS_LIFECYCLE_VERSION = "3.17.5"
+CONTINUOUS_LIFECYCLE_VERSION = "3.17.6"
 FIRST_DEVICE_EXECUTION_MAX_RUNTIME = 75
 FIRST_DEVICE_EXECUTION_SHUTDOWN_GRACE = 3
 MIN_AGENT_BYTES = 100000
@@ -2321,11 +2321,32 @@ def _persistent_settings_material(identity, persisted_identity):
     expected_group=f"Smart Pro Managed — {identity['installation_id']}"
     if state.get('verified') is not True or material.get('target_group_name')!=expected_group:
         raise RuntimeError('persistent_target_settings_not_verified|Το promoted target runtime source δεν επαληθεύτηκε.')
+    # 3.17.6 compatibility bridge: identities seeded by the Portal-bound first-device
+    # flow persist a 16-char hint of the immutable MeshCentral mesh id, while the
+    # older group-migration target-settings contract exposes a 12-char hint of the
+    # .msh MeshID field. These are different hint namespaces and must not be compared
+    # directly. This exception is deliberately narrow and does NOT weaken identity
+    # continuity: the exact target source fingerprint is still compared here and
+    # _validate_persisted_mesh_identity(identity, settings) immediately afterwards
+    # requires the full SHA-256 binding over MeshName/MeshType/MeshID/ServerID/
+    # MeshServer/agentName to match the persisted stable identity.
+    first_device_target_identity = (
+        _safe_str((persisted_identity or {}).get('runtime_source'),20).lower() == 'target'
+        and not _safe_str((persisted_identity or {}).get('promotion_state'),40)
+        and not _safe_str((persisted_identity or {}).get('target_binding_hint'),20)
+        and not _safe_str((persisted_identity or {}).get('shared_source_fingerprint_hint'),20)
+        and FIRST_DEVICE_MESH_HINT_RE.fullmatch(_safe_str((persisted_identity or {}).get('target_mesh_id_hint'),20)) is not None
+        and FINGERPRINT_HINT_RE.fullmatch(_safe_str(material.get('target_mesh_id_hint'),20)) is not None
+    )
     for field in ('target_mesh_id_hint','target_binding_hint','target_source_fingerprint_hint','shared_source_fingerprint_hint'):
         expected=_safe_str((persisted_identity or {}).get(field),20)
         actual=_safe_str(material.get(field),20)
+        if field == 'target_mesh_id_hint' and first_device_target_identity:
+            continue
         if expected and not secrets.compare_digest(expected,actual):
             raise RuntimeError('persistent_target_binding_changed|Το promoted target binding άλλαξε μετά το commit.')
+    if first_device_target_identity:
+        print('[managed] first-device target hint compatibility accepted; exact persisted .msh binding hash verification remains required', flush=True)
     material['runtime_source']='target'
     return material
 
@@ -5898,7 +5919,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <style>
 :root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;background:#10151d;color:#eef5ff;font:14px/1.5 Arial,Helvetica,sans-serif}}main{{max-width:1000px;margin:0 auto;padding:24px}}.hero{{background:#172231;border:1px solid #2c4158;border-radius:16px;padding:22px;margin-bottom:16px}}h1{{margin:0 0 5px;font-size:27px}}h2{{margin:0 0 10px;font-size:18px}}.sub{{color:#aab9ca}}.badge{{display:inline-block;margin-top:14px;padding:8px 12px;border-radius:999px;font-weight:700}}.ok{{background:#173a2a;color:#9ff0bd;border:1px solid #2c7750}}.bad{{background:#442128;color:#ffb5c0;border:1px solid #8c3d4d}}.warn{{background:#43381a;color:#ffe49a;border:1px solid #8b7331}}.note{{margin-top:15px;padding:13px 15px;border-radius:10px;background:#12293a;border:1px solid #245473;color:#cfeeff}}.notice{{margin:0 0 16px;padding:12px 14px;border-radius:10px}}.notice-ok{{background:#173a2a;border:1px solid #2c7750;color:#bdf7d0}}.notice-bad{{background:#442128;border:1px solid #8c3d4d;color:#ffd0d6}}.notice-info{{background:#12293a;border:1px solid #245473;color:#cfeeff}}.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.card,.pairbox{{background:#171d26;border:1px solid #293646;border-radius:12px;padding:15px}}.k{{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:#8fa1b5}}.v{{font-size:15px;font-weight:700;margin-top:4px;overflow-wrap:anywhere}}.pairbox{{margin:16px 0}}.pairbox p{{color:#b7c5d5}}label{{display:block;font-weight:700;margin:12px 0 6px}}input{{width:100%;max-width:460px;padding:11px 12px;border-radius:8px;border:1px solid #3b4c60;background:#0f151d;color:#fff;font:inherit}}button{{display:block;margin-top:12px;border:0;border-radius:8px;padding:10px 14px;background:#19aee8;color:#06131b;font-weight:800;cursor:pointer}}button:disabled,input:disabled{{opacity:.5;cursor:not-allowed}}code{{color:#9fdfff}}.mini-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.mini-grid div{{background:#111821;border:1px solid #28384a;border-radius:9px;padding:10px}}.mini-grid span{{display:block;color:#8fa1b5;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}}.mini-grid strong{{overflow-wrap:anywhere}}.footer{{margin-top:18px;color:#7f91a6;font-size:12px}}@media(max-width:650px){{main{{padding:14px}}.grid,.mini-grid{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.17.5 · Continuous Runtime Lifecycle Verification · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
+<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.17.6 · First-Device Target Binding Compatibility · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
 {notice_html}
 {pair_html}
 {enrollment_html}
@@ -5930,12 +5951,12 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <div class="card"><div class="k">MeshCentral stable identity</div><div class="v">{esc(mesh_identity_label)} · generation {esc(mesh_identity_generation)} · runs {esc(mesh_identity_runs)} · DB {esc(mesh_identity_db_hint)} · {esc(mesh_identity_updated)}</div></div>
 <div class="card"><div class="k">Remote access</div><div class="v">Όχι — το node μπορεί να είναι online, αλλά web/Terminal/Files technician actions παραμένουν NOT AUTHORIZED</div></div>
 </section>
-<div class="footer">3.17.5 continuous-runtime lifecycle verification. Preserves the verified 3.17.4 first-device proof and stable identity, enables only explicit unattended start/stop for reconnect/restart QA, and keeps technician actions NOT AUTHORIZED.</div>
+<div class="footer">3.17.6 first-device target-binding compatibility. Preserves the verified stable identity and unattended lifecycle while reconciling the first-device and legacy migration MeshID hint namespaces; technician actions remain NOT AUTHORIZED.</div>
 </main></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SmartProManaged/3.17.5"
+    server_version = "SmartProManaged/3.17.6"
 
     def _send(self, code, body, content_type):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
@@ -6055,7 +6076,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(409, render_page(read_policy(), "Η 3.17.4 είναι κλειδωμένο controlled retry/reset checkpoint. Επιτρέπονται μόνο reset consume και αργότερα explicit armed first-device execution.", "bad"), "text/html; charset=utf-8")
             return
         if VERSION == CONTINUOUS_LIFECYCLE_VERSION and not (is_persistent_start or is_persistent_stop):
-            self._send(409, render_page(read_policy(), "Η 3.17.5 είναι κλειδωμένο continuous-runtime lifecycle checkpoint. Επιτρέπονται μόνο explicit unattended start/stop. Τα παλιά mutation/test actions παραμένουν ιστορικά και δεν επαναλαμβάνονται.", "bad"), "text/html; charset=utf-8")
+            self._send(409, render_page(read_policy(), "Η 3.17.6 είναι κλειδωμένο continuous-runtime lifecycle checkpoint. Επιτρέπονται μόνο explicit unattended start/stop. Τα παλιά mutation/test actions παραμένουν ιστορικά και δεν επαναλαμβάνονται.", "bad"), "text/html; charset=utf-8")
             return
         if PERSISTENT_WORKER_ACTIVE and not (is_persistent_stop or is_group_migration_preflight or is_group_migration_target_settings or is_group_migration_canary or is_group_identity_reseed_canary or is_candidate_reconnect_canary or is_candidate_promotion):
             self._send(409, render_page(read_policy(), "Η continuous Managed λειτουργία είναι ενεργή. Επιτρέπονται μόνο ασφαλής τερματισμός ή οι verification-only migration έλεγχοι.", "bad"), "text/html; charset=utf-8")
@@ -6315,7 +6336,7 @@ if __name__ == "__main__":
         unattended_thread = threading.Thread(target=unattended_supervisor, name="managed-unattended-supervisor", daemon=True)
         unattended_thread.start()
         if VERSION == CONTINUOUS_LIFECYCLE_VERSION:
-            print("[managed] 3.17.5 lifecycle checkpoint: unattended supervisor available; explicit start/stop only; stable identity reuse required; technician_actions=false", flush=True)
+            print("[managed] 3.17.6 lifecycle checkpoint: unattended supervisor available; explicit start/stop only; stable identity reuse required; technician_actions=false", flush=True)
     else:
         print("[managed] 3.17.4 checkpoint lock: unattended supervisor NOT started; controlled retry reset requires explicit UI consume; execution still requires later Broker arm + UI action", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

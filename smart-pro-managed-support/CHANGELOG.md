@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.17.6 — First-Device Target Binding Compatibility
+- Built directly from 3.17.5 after live `persistent_target_binding_changed` on ID-34973.
+- Root cause: the first-device provisioning state stores a 16-character hint of the immutable MeshCentral mesh id, while the legacy group-migration target-settings contract exposes a 12-character hint of the `.msh` `MeshID`; these are intentionally different hint namespaces.
+- Adds a narrowly-scoped compatibility path only for a TARGET identity seeded by the verified first-device flow (no promotion state, no legacy target-binding hint, no shared-source hint).
+- Does not compare those heterogeneous MeshID hints directly.
+- Still requires the exact target source fingerprint and, immediately afterwards, the existing full persisted identity binding SHA-256 over `MeshName`, `MeshType`, `MeshID`, `ServerID`, `MeshServer`, and `agentName`.
+- No Broker change required; intended counterpart remains Broker 0.56.4.
+- No re-pair, reseed, new identity, MeshCentral permission mutation, `-install`, service persistence, or technician authorization.
+
 ## 3.17.5 — Continuous Runtime Lifecycle Unlock + Control UI Fix
 - Built directly from live-verified 3.17.4 after first-device PASS and restart identity persistence PASS.
 - Preserves the 3.17.4 first-device proof and stable MeshAgent identity; no reset/re-arm/reseed.

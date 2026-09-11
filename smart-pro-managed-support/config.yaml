@@ -1,6 +1,6 @@
 name: "Smart Pro Managed Support"
-description: "Continuous runtime lifecycle verification for ID-34973. Preserves the verified 3.17.4 first-device proof and stable identity, enables explicit unattended start/stop with reuse-only identity, and keeps technician actions disabled."
-version: "3.17.5"
+description: "First-device target-binding compatibility for ID-34973. Preserves the verified stable MeshAgent identity and unattended lifecycle while reconciling first-device and legacy migration MeshID hint namespaces; technician actions remain disabled."
+version: "3.17.6"
 slug: "smart_pro_managed_support"
 arch:
   - amd64
