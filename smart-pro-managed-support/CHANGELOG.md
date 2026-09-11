@@ -1,3 +1,9 @@
+## 3.17.3 — Controlled Retry Reset Consumer
+- Exact ID-34973/amd64 one-time Broker 0.56 retry reset consume.
+- No automatic arm, no MeshAgent execution, no technician actions.
+- Local failed 3.17.2 proof is required before consume; only non-secret metadata is retained.
+- Later execution remains separately admin-armed and bounded.
+
 # Changelog
 
 ## 3.17.2

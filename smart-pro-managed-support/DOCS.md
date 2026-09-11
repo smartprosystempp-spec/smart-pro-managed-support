@@ -1,4 +1,4 @@
-# Smart Pro Managed Support 3.17.2
+# Smart Pro Managed Support 3.17.3
 
 Bounded first-device execution canary for the hard-pinned Portal-bound `ID-34973` / `amd64` target.
 

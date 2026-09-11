@@ -21,7 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.17.2")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.17.3")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -35,6 +35,7 @@ ENROLLMENT_STATE_FILE = DATA_DIR / "enrollment-authorization.json"
 SETTINGS_STATE_FILE = DATA_DIR / "settings-verification.json"
 FIRST_DEVICE_SETTINGS_STATE_FILE = DATA_DIR / "first-device-settings-verification.json"
 FIRST_DEVICE_EXECUTION_STATE_FILE = DATA_DIR / "first-device-execution-canary.json"
+FIRST_DEVICE_RETRY_RESET_STATE_FILE = DATA_DIR / "first-device-retry-reset.json"
 AGENT_STATE_FILE = DATA_DIR / "agent-binary-verification.json"
 RUNTIME_STATE_FILE = DATA_DIR / "runtime-lease-dry-run.json"
 CANARY_STATE_FILE = DATA_DIR / "identity-continuity-canary.json"
@@ -96,7 +97,7 @@ FINGERPRINT_HINT_RE = re.compile(r"^[a-f0-9]{12}$")
 FIRST_DEVICE_MESH_HINT_RE = re.compile(r"^[a-f0-9]{16}$")
 FIRST_DEVICE_INSTALLATION = "ID-34973"
 FIRST_DEVICE_GROUP = "Smart Pro Managed — ID-34973"
-FIRST_DEVICE_EXECUTION_VERSION = "3.17.2"
+FIRST_DEVICE_EXECUTION_VERSION = "3.17.3"
 FIRST_DEVICE_EXECUTION_MAX_RUNTIME = 75
 FIRST_DEVICE_EXECUTION_SHUTDOWN_GRACE = 3
 MIN_AGENT_BYTES = 100000
@@ -1088,6 +1089,98 @@ def load_first_device_execution_state():
     }
 
 
+
+def save_first_device_retry_reset_state(state):
+    """Persist non-secret retry/reset metadata only."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    safe={
+        'status':_safe_str(state.get('status') or 'not_run',40),
+        'retry_generation':max(0,_as_int(state.get('retry_generation')) or 0),
+        'consumed_at':_as_int(state.get('consumed_at')) or 0,
+        'installation_id':_safe_str(state.get('installation_id'),100).upper(),
+        'node_id':_safe_str(state.get('node_id'),64).upper(),
+        'client_version':_safe_str(state.get('client_version'),30),
+        'architecture':_safe_str(state.get('architecture'),20),
+        'previous_result':_safe_str(state.get('previous_result'),80),
+        'previous_elapsed_seconds':max(0,_as_int(state.get('previous_elapsed_seconds')) or 0),
+        'previous_device_count':_as_int(state.get('previous_device_count')) if _as_int(state.get('previous_device_count')) is not None else -1,
+        'broker_device_count':_as_int(state.get('broker_device_count')) if _as_int(state.get('broker_device_count')) is not None else -1,
+        'execution_armed':False,'execution_authorized':False,'technician_actions_authorized':False,
+        'error_code':_safe_str(state.get('error_code'),80),'error_message':_safe_str(state.get('error_message'),300),
+    }
+    tmp=FIRST_DEVICE_RETRY_RESET_STATE_FILE.with_suffix('.tmp')
+    fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+    try:
+        with os.fdopen(fd,'w',encoding='utf-8') as h:
+            h.write(json.dumps(safe,ensure_ascii=False,separators=(',',':'))); h.flush(); os.fsync(h.fileno())
+        os.replace(tmp,FIRST_DEVICE_RETRY_RESET_STATE_FILE); os.chmod(FIRST_DEVICE_RETRY_RESET_STATE_FILE,0o600)
+    finally:
+        try:
+            if tmp.exists(): tmp.unlink()
+        except OSError: pass
+
+
+def load_first_device_retry_reset_state():
+    try:
+        if not FIRST_DEVICE_RETRY_RESET_STATE_FILE.exists() or FIRST_DEVICE_RETRY_RESET_STATE_FILE.stat().st_size<=0 or FIRST_DEVICE_RETRY_RESET_STATE_FILE.stat().st_size>8192: return {}
+        data=json.loads(FIRST_DEVICE_RETRY_RESET_STATE_FILE.read_text(encoding='utf-8'))
+    except (OSError,UnicodeError,json.JSONDecodeError): return {}
+    if not isinstance(data,dict): return {}
+    status=_safe_str(data.get('status'),40)
+    if status not in {'not_run','consumed','failed'}: status='not_run'
+    return {
+        'status':status,'retry_generation':max(0,_as_int(data.get('retry_generation')) or 0),'consumed_at':_as_int(data.get('consumed_at')) or 0,
+        'installation_id':_safe_str(data.get('installation_id'),100).upper(),'node_id':_safe_str(data.get('node_id'),64).upper(),
+        'client_version':_safe_str(data.get('client_version'),30),'architecture':_safe_str(data.get('architecture'),20),
+        'previous_result':_safe_str(data.get('previous_result'),80),'previous_elapsed_seconds':max(0,_as_int(data.get('previous_elapsed_seconds')) or 0),
+        'previous_device_count':_as_int(data.get('previous_device_count')) if _as_int(data.get('previous_device_count')) is not None else -1,
+        'broker_device_count':_as_int(data.get('broker_device_count')) if _as_int(data.get('broker_device_count')) is not None else -1,
+        'execution_armed':False,'execution_authorized':False,'technician_actions_authorized':False,
+        'error_code':_safe_str(data.get('error_code'),80),'error_message':_safe_str(data.get('error_message'),300),
+    }
+
+
+def consume_first_device_retry_reset():
+    """Consume Broker 0.56 reset generation 1; never arm or execute MeshAgent."""
+    identity=load_identity()
+    if identity is None: raise RuntimeError('first_device_retry_reset_not_paired|Απαιτείται ενεργή Managed identity.')
+    if VERSION!='3.17.3' or ARCH!='amd64' or identity.get('installation_id')!=FIRST_DEVICE_INSTALLATION:
+        raise RuntimeError('first_device_retry_reset_scope|Το controlled retry reset επιτρέπεται μόνο στο exact ID-34973 / 3.17.3 / amd64.')
+    if FIRST_DEVICE_EXECUTION_WORKER_ACTIVE: raise RuntimeError('first_device_retry_reset_execution_active|Δεν επιτρέπεται reset όσο υπάρχει execution worker.')
+    if not read_policy().get('allowed_local'): raise RuntimeError('first_device_retry_reset_local_policy|Η τοπική Managed πολιτική δεν επιτρέπει controlled retry reset.')
+    server=get_server_state(); until=_as_int(server.get('valid_until')) or 0
+    if server.get('authorized_server') is not True or until<=now_ts(): raise RuntimeError('first_device_retry_reset_server_auth|Απαιτείται ενεργό Broker Server Authorization.')
+    existing=load_first_device_retry_reset_state()
+    if existing.get('status')=='consumed' and existing.get('retry_generation')==1 and existing.get('node_id')==identity['node_id']: return existing
+    prior=load_first_device_execution_state()
+    if not (prior.get('status')=='failed' and prior.get('installation_id')==FIRST_DEVICE_INSTALLATION and prior.get('node_id')==identity['node_id']
+            and prior.get('client_version')=='3.17.2' and prior.get('architecture')=='amd64'):
+        raise RuntimeError('first_device_retry_reset_prior_state|Λείπει το exact local failed 3.17.2 proof. Δεν γίνεται reset από ασαφή κατάσταση.')
+    payload={'node_id':identity['node_id'],'node_secret':identity['node_secret'],'client_version':VERSION,'architecture':ARCH}
+    try:
+        res=broker_post('/managed/first-device/execution/retry-reset/consume',payload)
+        ok=(res.get('success') is True and res.get('phase')=='portal_bound_first_device_execution_retry_reset_consume'
+            and res.get('contract_id')=='smart-pro-first-device-retry-reset-v1' and _as_int(res.get('schema_version'))==1
+            and res.get('reset_consumed') is True and _as_int(res.get('retry_generation'))==1
+            and _safe_str(res.get('installation_ref'),100).upper()==FIRST_DEVICE_INSTALLATION and _safe_str(res.get('client_version'),30)=='3.17.3'
+            and _as_int(res.get('device_count'))==0 and res.get('execution_armed') is False and res.get('execution_authorized') is False
+            and res.get('device_enrollment_authorized') is False and res.get('technician_actions_authorized') is False)
+        if not ok: raise RuntimeError('first_device_retry_reset_contract|Ο Broker επέστρεψε μη έγκυρο controlled retry reset contract.')
+        state={'status':'consumed','retry_generation':1,'consumed_at':now_ts(),'installation_id':identity['installation_id'],'node_id':identity['node_id'],
+            'client_version':VERSION,'architecture':ARCH,'previous_result':prior.get('result_code'),'previous_elapsed_seconds':prior.get('elapsed_seconds'),
+            'previous_device_count':prior.get('device_count'),'broker_device_count':0}
+        save_first_device_retry_reset_state(state)
+        save_first_device_execution_state({'status':'not_run','verified':False,'installation_id':identity['installation_id'],'node_id':identity['node_id'],
+            'client_version':VERSION,'architecture':ARCH,'device_count':0,'diagnostic_stage':'retry_reset_consumed','runtime_directory_deleted':True})
+        print('[managed] controlled retry reset consumed generation=1 device_count=0; execution_armed=false execution=false technician_actions=false',flush=True)
+        return state
+    except RuntimeError as exc:
+        text=str(exc); code,msg=(text.split('|',1)+[''])[:2] if '|' in text else ('first_device_retry_reset_failed',text)
+        save_first_device_retry_reset_state({'status':'failed','installation_id':identity['installation_id'],'node_id':identity['node_id'],'client_version':VERSION,'architecture':ARCH,
+            'previous_result':prior.get('result_code'),'previous_elapsed_seconds':prior.get('elapsed_seconds'),'previous_device_count':prior.get('device_count'),
+            'error_code':code,'error_message':msg})
+        raise
+
 def broker_first_device_agent_post(endpoint, payload, expected_bytes, expected_sha):
     expected_bytes = _as_int(expected_bytes) or 0
     expected_sha = _safe_str(expected_sha,80).lower()
@@ -1192,7 +1285,11 @@ def first_device_execution_worker():
     try:
         if identity is None: raise RuntimeError('first_device_execution_not_paired|Απαιτείται ενεργή Managed identity.')
         if VERSION != FIRST_DEVICE_EXECUTION_VERSION or ARCH != 'amd64' or identity.get('installation_id') != FIRST_DEVICE_INSTALLATION:
-            raise RuntimeError('first_device_execution_scope|Το bounded first-device canary επιτρέπεται μόνο στο exact ID-34973 / 3.17.2 / amd64.')
+            raise RuntimeError('first_device_execution_scope|Το bounded first-device canary επιτρέπεται μόνο στο exact ID-34973 / 3.17.3 / amd64.')
+        reset=load_first_device_retry_reset_state()
+        if not (reset.get('status')=='consumed' and reset.get('retry_generation')==1 and reset.get('installation_id')==FIRST_DEVICE_INSTALLATION
+                and reset.get('node_id')==identity['node_id'] and reset.get('client_version')=='3.17.3' and reset.get('architecture')=='amd64'):
+            raise RuntimeError('first_device_execution_retry_reset_required|Απαιτείται πρώτα successful controlled retry reset consume generation 1.')
         if not read_policy().get('allowed_local'):
             raise RuntimeError('first_device_execution_local_policy|Η τοπική Managed πολιτική δεν επιτρέπει το first-device canary.')
         server=get_server_state(); server_until=_as_int(server.get('valid_until')) or 0
@@ -5004,6 +5101,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
     settings_state = load_settings_state()
     first_device_settings_state = load_first_device_settings_state()
     first_device_execution_state = load_first_device_execution_state()
+    first_device_retry_reset_state = load_first_device_retry_reset_state()
     agent_state = load_agent_state()
     runtime_state = load_runtime_state()
     canary_state = load_canary_state()
@@ -5185,17 +5283,37 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         fdx_watch_count = str(first_device_execution_state.get('watch_count') or 0)
         fdx_process_started = 'ΝΑΙ' if first_device_execution_state.get('process_started') else 'ΟΧΙ'
         fdx_report_state = ('OK' if first_device_execution_state.get('report_succeeded') else ('ATTEMPTED' if first_device_execution_state.get('report_attempted') else 'ΟΧΙ'))
+        reset_current = (first_device_retry_reset_state.get('installation_id')==identity['installation_id'] and first_device_retry_reset_state.get('node_id')==identity['node_id']
+            and first_device_retry_reset_state.get('client_version')==VERSION and first_device_retry_reset_state.get('architecture')==ARCH)
+        reset_consumed = bool(reset_current and first_device_retry_reset_state.get('status')=='consumed' and first_device_retry_reset_state.get('retry_generation')==1)
+        reset_label = 'CONSUMED — GENERATION 1 / EXECUTION STILL DISARMED' if reset_consumed else ('FAILED — REVIEW / SAFE BROKER RECONCILIATION AVAILABLE' if reset_current and first_device_retry_reset_state.get('status')=='failed' else 'AUTHORIZED SERVER-SIDE — WAITING FOR CLIENT CONSUME')
+        reset_time = fmt_epoch(first_device_retry_reset_state.get('consumed_at')) if reset_consumed else '—'
+        reset_disabled = ' disabled' if (not overall or VERSION!='3.17.3' or ARCH!='amd64' or identity['installation_id']!=FIRST_DEVICE_INSTALLATION or reset_consumed or FIRST_DEVICE_EXECUTION_WORKER_ACTIVE) else ''
         fdx_scope_ok = identity['installation_id'] == FIRST_DEVICE_INSTALLATION and VERSION == FIRST_DEVICE_EXECUTION_VERSION and ARCH == 'amd64'
-        fdx_disabled = ' disabled' if (not overall or not fdx_scope_ok or FIRST_DEVICE_EXECUTION_WORKER_ACTIVE or fdx_status in {'preparing','running','reported','failed'}
+        fdx_disabled = ' disabled' if (not overall or not fdx_scope_ok or not reset_consumed or FIRST_DEVICE_EXECUTION_WORKER_ACTIVE or fdx_status in {'preparing','running','reported','failed'}
             or PERSISTENT_WORKER_ACTIVE or CANARY_WORKER_ACTIVE or MIGRATION_CANARY_WORKER_ACTIVE or IDENTITY_RESEED_WORKER_ACTIVE or CANDIDATE_RECONNECT_WORKER_ACTIVE or PROMOTION_WORKER_ACTIVE) else ''
         first_device_execution_html = f"""
 <section class="pairbox">
-<h2>Portal-bound bounded first-device execution — 3.17.2 diagnostics</h2>
-<p>Hard-pinned αποκλειστικά στο <strong>ID-34973 / amd64</strong>. Λειτουργεί μόνο μετά από προσωρινό admin arm σε συμβατό Broker execution gate. Η 3.17.2 προσθέτει metadata-only stage diagnostics χωρίς automatic retry. Καταναλώνει μία φορά το exact execution contract, επαληθεύει ξανά το prepared <code>.msh</code> και το approved MeshAgent, ζητά fresh 0-device start window και εκτελεί τον agent μόνο <strong>foreground / bounded ≤75″</strong>. Δεν χρησιμοποιεί <code>-install</code>, δεν δημιουργεί service/systemd και technician actions παραμένουν <strong>NOT AUTHORIZED</strong>. Δεν υπάρχει automatic retry.</p>
+<h2>Controlled first-device retry reset — 3.17.3</h2>
+<p>Η 3.17.3 καταναλώνει <strong>μία φορά</strong> το admin-authorized Broker 0.56 reset generation 1. Η ενέργεια κάνει authenticated 0-device recheck και καθαρίζει μόνο το retryable execution-attempt state. <strong>Δεν κάνει Arm, δεν παραδίδει MeshAgent και δεν εκτελεί τίποτα.</strong></p>
+<div class="mini-grid">
+<div><span>Retry reset</span><strong>{esc(reset_label)}</strong></div>
+<div><span>Retry generation</span><strong>{esc(str(first_device_retry_reset_state.get('retry_generation') or 0))}</strong></div>
+<div><span>Reset consumed at</span><strong>{esc(reset_time)}</strong></div>
+<div><span>Execution armed</span><strong>ΟΧΙ</strong></div>
+<div><span>Technician actions</span><strong>NOT AUTHORIZED</strong></div>
+</div>
+<form method="post" action="first-device-retry-reset-consume">
+<input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
+<button type="submit"{reset_disabled}>Consume authorized retry reset — NO EXECUTION</button>
+</form>
+<hr>
+<h3>Bounded first-device execution — only after later Broker Arm</h3>
+<p>Μετά από successful reset consume, η ίδια 3.17.3 μπορεί να εκτελέσει το bounded foreground canary ≤75″ μόνο μετά από ξεχωριστό Broker admin arm. Δεν υπάρχει automatic arm ή automatic retry.</p>
 <div class="mini-grid">
 <div><span>Κατάσταση</span><strong>{esc(fdx_label)}</strong></div>
 <div><span>Installation</span><strong>ID-34973 ONLY</strong></div>
-<div><span>Client / Arch</span><strong>3.17.2 / amd64</strong></div>
+<div><span>Client / Arch</span><strong>3.17.3 / amd64</strong></div>
 <div><span>Τελευταίο state</span><strong>{esc(fdx_time)}</strong></div>
 <div><span>Source fingerprint hint</span><strong>{esc(fdx_source)}</strong></div>
 <div><span>Immutable Mesh hint</span><strong>{esc(fdx_mesh)}</strong></div>
@@ -5811,7 +5929,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <div class="card"><div class="k">MeshCentral stable identity</div><div class="v">{esc(mesh_identity_label)} · generation {esc(mesh_identity_generation)} · runs {esc(mesh_identity_runs)} · DB {esc(mesh_identity_db_hint)} · {esc(mesh_identity_updated)}</div></div>
 <div class="card"><div class="k">Remote access</div><div class="v">Όχι — το node μπορεί να είναι online, αλλά web/Terminal/Files technician actions παραμένουν NOT AUTHORIZED</div></div>
 </section>
-<div class="footer">3.17.2 bounded first-device execution canary. Hard-pinned ID-34973 / amd64 / compatible Broker execution gate. Απαιτεί προσωρινό admin arm, one-time execution/material delivery και fresh 0-device start verification. Εκτελεί μόνο foreground ≤75s, χωρίς -install/service persistence και χωρίς technician authorization. Δεν υπάρχει automatic retry.</div>
+<div class="footer">3.17.3 controlled retry-reset consumer + bounded first-device execution client. Hard-pinned ID-34973 / amd64. Reset consume = one-time / authenticated / 0-device verified / NO EXECUTION. Later canary still requires explicit Broker admin arm and stays foreground ≤75s, χωρίς -install/service persistence ή technician authorization.</div>
 </main></body></html>"""
 
 
@@ -5904,6 +6022,7 @@ class Handler(BaseHTTPRequestHandler):
         is_settings = path.endswith("/settings-check") or path == "settings-check"
         is_first_device_settings = path.endswith("/first-device-settings-check") or path == "first-device-settings-check"
         is_first_device_execution = path.endswith("/first-device-execution-canary") or path == "first-device-execution-canary"
+        is_first_device_retry_reset = path.endswith("/first-device-retry-reset-consume") or path == "first-device-retry-reset-consume"
         is_agent = path.endswith("/agent-check") or path == "agent-check"
         is_runtime = path.endswith("/runtime-lease-check") or path == "runtime-lease-check"
         is_canary = path.endswith("/identity-continuity-canary") or path == "identity-continuity-canary"
@@ -5915,7 +6034,7 @@ class Handler(BaseHTTPRequestHandler):
         is_group_identity_reseed_canary = path.endswith("/group-identity-reseed-canary") or path == "group-identity-reseed-canary"
         is_candidate_reconnect_canary = path.endswith("/candidate-reconnect-canary") or path == "candidate-reconnect-canary"
         is_candidate_promotion = path.endswith("/candidate-promotion") or path == "candidate-promotion"
-        if not is_pair and not is_enrollment and not is_settings and not is_first_device_settings and not is_first_device_execution and not is_agent and not is_runtime and not is_canary and not is_persistent_start and not is_persistent_stop and not is_group_migration_preflight and not is_group_migration_target_settings and not is_group_migration_canary and not is_group_identity_reseed_canary and not is_candidate_reconnect_canary and not is_candidate_promotion:
+        if not is_pair and not is_enrollment and not is_settings and not is_first_device_settings and not is_first_device_execution and not is_first_device_retry_reset and not is_agent and not is_runtime and not is_canary and not is_persistent_start and not is_persistent_stop and not is_group_migration_preflight and not is_group_migration_target_settings and not is_group_migration_canary and not is_group_identity_reseed_canary and not is_candidate_reconnect_canary and not is_candidate_promotion:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
         length = _as_int(self.headers.get("Content-Length")) or 0
@@ -5931,8 +6050,8 @@ class Handler(BaseHTTPRequestHandler):
         if not secrets.compare_digest(csrf, CSRF_TOKEN):
             self._send(403, render_page(read_policy(), "Η φόρμα ενεργοποίησης έληξε. Ανανεώστε τη σελίδα.", "bad"), "text/html; charset=utf-8")
             return
-        if VERSION == FIRST_DEVICE_EXECUTION_VERSION and not is_first_device_execution:
-            self._send(409, render_page(read_policy(), "Η 3.17.2 είναι κλειδωμένο first-device execution checkpoint. Καμία legacy Managed ενέργεια δεν επιτρέπεται από αυτό το build.", "bad"), "text/html; charset=utf-8")
+        if VERSION == FIRST_DEVICE_EXECUTION_VERSION and not (is_first_device_execution or is_first_device_retry_reset):
+            self._send(409, render_page(read_policy(), "Η 3.17.3 είναι κλειδωμένο controlled retry/reset checkpoint. Επιτρέπονται μόνο reset consume και αργότερα explicit armed first-device execution.", "bad"), "text/html; charset=utf-8")
             return
         if PERSISTENT_WORKER_ACTIVE and not (is_persistent_stop or is_group_migration_preflight or is_group_migration_target_settings or is_group_migration_canary or is_group_identity_reseed_canary or is_candidate_reconnect_canary or is_candidate_promotion):
             self._send(409, render_page(read_policy(), "Η continuous Managed λειτουργία είναι ενεργή. Επιτρέπονται μόνο ασφαλής τερματισμός ή οι verification-only migration έλεγχοι.", "bad"), "text/html; charset=utf-8")
@@ -5971,6 +6090,15 @@ class Handler(BaseHTTPRequestHandler):
                     render_page(read_policy(), message or "Ο έλεγχος enrollment authorization απέτυχε.", "bad"),
                     "text/html; charset=utf-8",
                 )
+            return
+
+        if is_first_device_retry_reset:
+            try:
+                consume_first_device_retry_reset()
+                self._send(200, render_page(read_policy(), "Το controlled retry reset generation 1 καταναλώθηκε. Execution παραμένει DISARMED και δεν εκτελέστηκε MeshAgent. Μην τρέξετε canary χωρίς ξεχωριστό Broker admin arm.", "ok"), "text/html; charset=utf-8")
+            except RuntimeError as exc:
+                message=str(exc).partition('|')[2] or "Δεν ήταν δυνατή η ασφαλής κατανάλωση του controlled retry reset."
+                self._send(409, render_page(read_policy(), message, "bad"), "text/html; charset=utf-8")
             return
 
         if is_first_device_execution:
@@ -6183,5 +6311,5 @@ if __name__ == "__main__":
         unattended_thread = threading.Thread(target=unattended_supervisor, name="managed-unattended-supervisor", daemon=True)
         unattended_thread.start()
     else:
-        print("[managed] 3.17.2 checkpoint lock: unattended supervisor NOT started; first-device execution requires explicit Broker arm + UI action", flush=True)
+        print("[managed] 3.17.3 checkpoint lock: unattended supervisor NOT started; controlled retry reset requires explicit UI consume; execution still requires later Broker arm + UI action", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
