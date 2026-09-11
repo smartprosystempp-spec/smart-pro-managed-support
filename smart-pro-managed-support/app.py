@@ -21,7 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.17.1")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.17.2")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -96,7 +96,7 @@ FINGERPRINT_HINT_RE = re.compile(r"^[a-f0-9]{12}$")
 FIRST_DEVICE_MESH_HINT_RE = re.compile(r"^[a-f0-9]{16}$")
 FIRST_DEVICE_INSTALLATION = "ID-34973"
 FIRST_DEVICE_GROUP = "Smart Pro Managed — ID-34973"
-FIRST_DEVICE_EXECUTION_VERSION = "3.17.1"
+FIRST_DEVICE_EXECUTION_VERSION = "3.17.2"
 FIRST_DEVICE_EXECUTION_MAX_RUNTIME = 75
 FIRST_DEVICE_EXECUTION_SHUTDOWN_GRACE = 3
 MIN_AGENT_BYTES = 100000
@@ -1027,6 +1027,13 @@ def save_first_device_execution_state(state):
         'identity_db_persisted': state.get('identity_db_persisted') is True,
         'identity_db_sha256_hint': _safe_str(state.get('identity_db_sha256_hint'), 20).lower(),
         'runtime_directory_deleted': state.get('runtime_directory_deleted') is True,
+        'diagnostic_stage': _safe_str(state.get('diagnostic_stage'), 80),
+        'broker_endpoint': _safe_str(state.get('broker_endpoint'), 160),
+        'failure_class': _safe_str(state.get('failure_class'), 80),
+        'watch_count': max(0, _as_int(state.get('watch_count')) or 0),
+        'process_started': state.get('process_started') is True,
+        'report_attempted': state.get('report_attempted') is True,
+        'report_succeeded': state.get('report_succeeded') is True,
         'raw_settings_persisted': False,
         'agent_binary_persisted': False,
         'technician_actions_authorized': False,
@@ -1070,6 +1077,13 @@ def load_first_device_execution_state():
         'identity_db_persisted': data.get('identity_db_persisted') is True,
         'identity_db_sha256_hint': _safe_str(data.get('identity_db_sha256_hint'),20).lower(),
         'runtime_directory_deleted': data.get('runtime_directory_deleted') is True,
+        'diagnostic_stage': _safe_str(data.get('diagnostic_stage'),80),
+        'broker_endpoint': _safe_str(data.get('broker_endpoint'),160),
+        'failure_class': _safe_str(data.get('failure_class'),80),
+        'watch_count': max(0,_as_int(data.get('watch_count')) or 0),
+        'process_started': data.get('process_started') is True,
+        'report_attempted': data.get('report_attempted') is True,
+        'report_succeeded': data.get('report_succeeded') is True,
         'raw_settings_persisted': False, 'agent_binary_persisted': False, 'technician_actions_authorized': False,
     }
 
@@ -1170,10 +1184,15 @@ def first_device_execution_worker():
     identity=load_identity(); runtime_dir=None; agent_temp=None; proc=None; report_token=''; started=now_ts(); result='launch_failed'; cleanup_ok=True
     source_hint=''; mesh_hint=''; source_sha=''; agent_sha=''; agent_bytes=0; mesh_host=''; max_runtime=0; device_count=-1
     identity_persisted=False; identity_db_hint=''; process_started=started
+    diagnostic_stage='preflight'; broker_endpoint=''; watch_count=0; process_started_flag=False; report_attempted=False; report_succeeded=False
+    def diag(stage, endpoint=''):
+        nonlocal diagnostic_stage, broker_endpoint
+        diagnostic_stage=_safe_str(stage,80); broker_endpoint=_safe_str(endpoint,160)
+        print(f"[managed] first-device diag stage={diagnostic_stage} endpoint={broker_endpoint or '-'}", flush=True)
     try:
         if identity is None: raise RuntimeError('first_device_execution_not_paired|Απαιτείται ενεργή Managed identity.')
         if VERSION != FIRST_DEVICE_EXECUTION_VERSION or ARCH != 'amd64' or identity.get('installation_id') != FIRST_DEVICE_INSTALLATION:
-            raise RuntimeError('first_device_execution_scope|Το bounded first-device canary επιτρέπεται μόνο στο exact ID-34973 / 3.17.1 / amd64.')
+            raise RuntimeError('first_device_execution_scope|Το bounded first-device canary επιτρέπεται μόνο στο exact ID-34973 / 3.17.2 / amd64.')
         if not read_policy().get('allowed_local'):
             raise RuntimeError('first_device_execution_local_policy|Η τοπική Managed πολιτική δεν επιτρέπει το first-device canary.')
         server=get_server_state(); server_until=_as_int(server.get('valid_until')) or 0
@@ -1190,10 +1209,14 @@ def first_device_execution_worker():
         existing=load_first_device_execution_state()
         if existing.get('status') in {'preparing','running','reported','failed'}:
             raise RuntimeError('first_device_execution_no_retry|Το first-device canary έχει ήδη ξεκινήσει/ολοκληρωθεί. Δεν επιτρέπεται δεύτερη εκτέλεση χωρίς checkpoint review.')
+        diag('preflight_passed')
         save_first_device_execution_state({'status':'preparing','verified':False,'started_at':started,'installation_id':identity['installation_id'],
-            'node_id':identity['node_id'],'client_version':VERSION,'architecture':ARCH})
+            'node_id':identity['node_id'],'client_version':VERSION,'architecture':ARCH,'diagnostic_stage':diagnostic_stage,'broker_endpoint':broker_endpoint,
+            'watch_count':watch_count,'process_started':process_started_flag,'report_attempted':report_attempted,'report_succeeded':report_succeeded})
         common={'node_id':identity['node_id'],'node_secret':identity['node_secret'],'client_version':VERSION,'architecture':ARCH}
+        diag('execution_request','/managed/first-device/execution/request')
         req=broker_post('/managed/first-device/execution/request',common)
+        diag('execution_request_received','/managed/first-device/execution/request')
         ticket=_safe_str(req.get('execution_ticket'),100); report_token=_safe_str(req.get('report_token'),100)
         source_hint=_safe_str(req.get('source_fingerprint_hint'),20).lower(); mesh_hint=_safe_str(req.get('mesh_id_hint'),20).lower()
         source_sha=_safe_str(req.get('source_sha256'),80).lower(); source_bytes=_as_int(req.get('source_bytes')) or 0
@@ -1219,7 +1242,9 @@ def first_device_execution_worker():
             raise RuntimeError('first_device_execution_previous_binding_changed|Το execution contract δεν συμφωνεί με το verified 3.16.0 settings checkpoint.')
 
         consume=dict(common); consume['execution_ticket']=ticket
+        diag('execution_consume','/managed/first-device/execution/consume')
         res=broker_post('/managed/first-device/execution/consume',consume); ticket=''
+        diag('execution_consume_received','/managed/first-device/execution/consume')
         encoded=res.get('data'); agent_ticket=_safe_str(res.get('agent_ticket'),100)
         rsource_sha=_safe_str(res.get('source_sha256'),80).lower(); rsource_bytes=_as_int(res.get('source_bytes')) or 0
         rsource_hint=_safe_str(res.get('source_fingerprint_hint'),20).lower(); rmesh_hint=_safe_str(res.get('mesh_id_hint'),20).lower(); rhost=_safe_str(res.get('mesh_server_host'),255).lower()
@@ -1246,14 +1271,18 @@ def first_device_execution_worker():
         raw=b''
         settings_material={'raw':hardened,'fields':fields,'agent_label':agent_label,'target_group_name':FIRST_DEVICE_GROUP,
             'target_mesh_id_hint':mesh_hint,'target_source_fingerprint_hint':source_hint,'runtime_source':'target'}
+        diag('agent_consume','/managed/first-device/execution/agent/consume')
         agent=broker_first_device_agent_post('/managed/first-device/execution/agent/consume',dict(common,agent_ticket=agent_ticket),agent_bytes,agent_sha)
+        diag('agent_consume_received','/managed/first-device/execution/agent/consume')
         agent_ticket=''; agent_temp=agent['path']
         disk_sha,disk_bytes=sha256_file(agent_temp)
         if disk_bytes!=agent_bytes or not secrets.compare_digest(disk_sha,agent_sha):
             raise RuntimeError('first_device_execution_agent_disk_integrity|Το MeshAgent binary απέτυχε στον δεύτερο disk SHA/bytes έλεγχο.')
         verify_elf64(agent_temp,'amd64')
 
+        diag('start_gate','/managed/first-device/execution/start')
         start=broker_post('/managed/first-device/execution/start',dict(common,report_token=report_token))
+        diag('start_gate_received','/managed/first-device/execution/start')
         hard_deadline=parse_iso_epoch(start.get('hard_deadline')); start_max=_as_int(start.get('max_runtime_seconds')) or 0
         if not (start.get('success') is True and start.get('phase')=='portal_bound_first_device_execution_start'
                 and start.get('foreground_only') is True and start.get('install') is False and start.get('service_persistence') is False
@@ -1268,11 +1297,17 @@ def first_device_execution_worker():
         private=runtime_dir/'private'; private.mkdir(mode=0o700)
         env=os.environ.copy(); env.update({'HOME':str(private),'TMPDIR':str(private),'XDG_CONFIG_HOME':str(private),'XDG_CACHE_HOME':str(private)})
         process_started=now_ts()
+        diag('runtime_prepared')
         save_first_device_execution_state({'status':'running','verified':False,'started_at':process_started,'max_runtime_seconds':max_runtime,
             'installation_id':identity['installation_id'],'node_id':identity['node_id'],'client_version':VERSION,'architecture':ARCH,
             'source_fingerprint_hint':source_hint,'mesh_id_hint':mesh_hint,'source_sha256_hint':source_sha[:12],
-            'agent_sha256_hint':agent_sha[:12],'agent_bytes':agent_bytes,'mesh_server_host':mesh_host})
+            'agent_sha256_hint':agent_sha[:12],'agent_bytes':agent_bytes,'mesh_server_host':mesh_host,
+            'diagnostic_stage':diagnostic_stage,'broker_endpoint':broker_endpoint,'watch_count':watch_count,'process_started':False,
+            'report_attempted':report_attempted,'report_succeeded':report_succeeded})
+        diag('process_launch')
         proc=subprocess.Popen(['setsid','./meshagent'],cwd=str(runtime_dir),stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=env,close_fds=True)
+        process_started_flag=True
+        diag('process_running')
         run_started=time.monotonic(); hard_stop=run_started+min(max_runtime,max(1,hard_deadline-now_ts())); graceful=max(run_started,hard_stop-FIRST_DEVICE_EXECUTION_SHUTDOWN_GRACE)
         result='runtime_limit'
         while True:
@@ -1281,6 +1316,8 @@ def first_device_execution_worker():
             if not read_policy().get('allowed_local'): result='authorization_lost'; break
             server=get_server_state()
             if server.get('authorized_server') is not True or (_as_int(server.get('valid_until')) or 0)<=now_ts(): result='authorization_lost'; break
+            watch_count += 1
+            diag(f'watch_{watch_count}','/managed/first-device/execution/watch')
             watch=broker_post('/managed/first-device/execution/watch',{'report_token':report_token,'node_id':identity['node_id'],'node_secret':identity['node_secret']})
             device_count=_as_int(watch.get('device_count')) if _as_int(watch.get('device_count')) is not None else device_count
             if watch.get('continue') is not True:
@@ -1293,10 +1330,15 @@ def first_device_execution_worker():
         _terminate_process_group_before(proc,hard_stop)
         elapsed=int(time.monotonic()-run_started)
         if result=='runtime_limit':
+            diag('identity_persist')
             persisted=_persist_runtime_mesh_identity(runtime_dir,identity,settings_material,{'state':'not_seeded','generation':0,'runtime_source':'target'})
             identity_persisted=True; identity_db_hint=_safe_str(persisted.get('db_sha256'),80)[:12]
+        report_attempted=True
+        diag('report','/managed/first-device/execution/report')
         report=broker_post('/managed/first-device/execution/report',{'report_token':report_token,'node_id':identity['node_id'],'node_secret':identity['node_secret'],
             'result_code':result,'elapsed_seconds':elapsed})
+        report_succeeded=True
+        diag('report_received','/managed/first-device/execution/report')
         report_token=''
         verified=(report.get('success') is True and report.get('reported') is True and report.get('verified') is True and _as_int(report.get('device_count'))==1
             and _safe_str(report.get('result_code'),80)=='first_device_verified' and result=='runtime_limit' and identity_persisted)
@@ -1306,22 +1348,32 @@ def first_device_execution_worker():
             'installation_id':identity['installation_id'],'node_id':identity['node_id'],'client_version':VERSION,'architecture':ARCH,
             'source_fingerprint_hint':source_hint,'mesh_id_hint':mesh_hint,'source_sha256_hint':source_sha[:12],
             'agent_sha256_hint':agent_sha[:12],'agent_bytes':agent_bytes,'mesh_server_host':mesh_host,'device_count':device_count,
-            'identity_db_persisted':identity_persisted,'identity_db_sha256_hint':identity_db_hint,'runtime_directory_deleted':False})
+            'identity_db_persisted':identity_persisted,'identity_db_sha256_hint':identity_db_hint,'runtime_directory_deleted':False,
+            'diagnostic_stage':diagnostic_stage,'broker_endpoint':broker_endpoint,'failure_class':'','watch_count':watch_count,
+            'process_started':process_started_flag,'report_attempted':report_attempted,'report_succeeded':report_succeeded})
         print(f"[managed] first-device canary result={'PASS' if verified else 'FAIL'} device_count={device_count} elapsed={elapsed}s identity_persisted={str(identity_persisted).lower()}; technician_actions=false",flush=True)
     except (RuntimeError,OSError,subprocess.SubprocessError) as exc:
         if proc is not None: _terminate_process_group(proc)
         elapsed=max(0,now_ts()-started); text=str(exc); code,msg=(text.split('|',1)+[''])[:2] if '|' in text else ('first_device_execution_failed',text)
+        failure_class = 'broker_transport' if code == 'broker_unreachable' else ('broker_http' if code.startswith('http_') else ('local_integrity' if any(x in code for x in ('invalid','mismatch','integrity','binding','scope')) else 'runtime'))
+        print(f"[managed] first-device diag failure stage={diagnostic_stage} endpoint={broker_endpoint or '-'} class={failure_class} code={code} watch_count={watch_count} process_started={str(process_started_flag).lower()}", flush=True)
         if report_token:
             try:
+                report_attempted=True
+                diag('failure_report','/managed/first-device/execution/report')
                 broker_post('/managed/first-device/execution/report',{'report_token':report_token,'node_id':(identity or {}).get('node_id',''),'node_secret':(identity or {}).get('node_secret',''),
                     'result_code':'cleanup_failed' if code.startswith('mesh_identity_') else 'launch_failed','elapsed_seconds':elapsed})
-            except RuntimeError: pass
+                report_succeeded=True
+            except RuntimeError:
+                pass
         save_first_device_execution_state({'status':'failed','verified':False,'started_at':started,'ended_at':now_ts(),'result_code':code,'elapsed_seconds':elapsed,
             'max_runtime_seconds':max_runtime,'installation_id':(identity or {}).get('installation_id',''),'node_id':(identity or {}).get('node_id',''),
             'client_version':VERSION,'architecture':ARCH,'source_fingerprint_hint':source_hint,'mesh_id_hint':mesh_hint,'source_sha256_hint':source_sha[:12],
             'agent_sha256_hint':agent_sha[:12],'agent_bytes':agent_bytes,'mesh_server_host':mesh_host,'device_count':device_count,
-            'identity_db_persisted':identity_persisted,'identity_db_sha256_hint':identity_db_hint,'runtime_directory_deleted':False})
-        print(f"[managed] first-device canary failed code={code}; no raw settings/tickets/binary logged",flush=True)
+            'identity_db_persisted':identity_persisted,'identity_db_sha256_hint':identity_db_hint,'runtime_directory_deleted':False,
+            'diagnostic_stage':diagnostic_stage,'broker_endpoint':broker_endpoint,'failure_class':failure_class,'watch_count':watch_count,
+            'process_started':process_started_flag,'report_attempted':report_attempted,'report_succeeded':report_succeeded})
+        print(f"[managed] first-device canary failed code={code} stage={diagnostic_stage} class={failure_class}; no raw settings/tickets/binary logged",flush=True)
     finally:
         if proc is not None: _terminate_process_group(proc)
         if agent_temp:
@@ -5119,7 +5171,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         elif fdx_status == 'failed':
             fdx_label = 'FAILED — NO RETRY / CHECKPOINT REVIEW REQUIRED'
         else:
-            fdx_label = 'READY — WAITING FOR BROKER 0.53.0 ARM'
+            fdx_label = 'READY — WAITING FOR COMPATIBLE BROKER ARM'
         fdx_time = fmt_epoch(first_device_execution_state.get('ended_at') or first_device_execution_state.get('started_at')) if fdx_current else '—'
         fdx_source = first_device_execution_state.get('source_fingerprint_hint') if fdx_current and first_device_execution_state.get('source_fingerprint_hint') else '—'
         fdx_mesh = first_device_execution_state.get('mesh_id_hint') if fdx_current and first_device_execution_state.get('mesh_id_hint') else '—'
@@ -5127,17 +5179,23 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         fdx_devices = str(first_device_execution_state.get('device_count')) if fdx_current and first_device_execution_state.get('device_count',-1) >= 0 else '—'
         fdx_identity = 'ΝΑΙ' if fdx_current and first_device_execution_state.get('identity_db_persisted') else 'ΟΧΙ'
         fdx_cleanup = 'ΝΑΙ' if fdx_current and first_device_execution_state.get('runtime_directory_deleted') else ('Σε εξέλιξη' if fdx_status in {'preparing','running'} else '—')
+        fdx_diag_stage = first_device_execution_state.get('diagnostic_stage') if first_device_execution_state.get('diagnostic_stage') else '—'
+        fdx_diag_endpoint = first_device_execution_state.get('broker_endpoint') if first_device_execution_state.get('broker_endpoint') else '—'
+        fdx_failure_class = first_device_execution_state.get('failure_class') if first_device_execution_state.get('failure_class') else '—'
+        fdx_watch_count = str(first_device_execution_state.get('watch_count') or 0)
+        fdx_process_started = 'ΝΑΙ' if first_device_execution_state.get('process_started') else 'ΟΧΙ'
+        fdx_report_state = ('OK' if first_device_execution_state.get('report_succeeded') else ('ATTEMPTED' if first_device_execution_state.get('report_attempted') else 'ΟΧΙ'))
         fdx_scope_ok = identity['installation_id'] == FIRST_DEVICE_INSTALLATION and VERSION == FIRST_DEVICE_EXECUTION_VERSION and ARCH == 'amd64'
         fdx_disabled = ' disabled' if (not overall or not fdx_scope_ok or FIRST_DEVICE_EXECUTION_WORKER_ACTIVE or fdx_status in {'preparing','running','reported','failed'}
             or PERSISTENT_WORKER_ACTIVE or CANARY_WORKER_ACTIVE or MIGRATION_CANARY_WORKER_ACTIVE or IDENTITY_RESEED_WORKER_ACTIVE or CANDIDATE_RECONNECT_WORKER_ACTIVE or PROMOTION_WORKER_ACTIVE) else ''
         first_device_execution_html = f"""
 <section class="pairbox">
-<h2>Portal-bound bounded first-device execution — 3.17.1</h2>
-<p>Hard-pinned αποκλειστικά στο <strong>ID-34973 / amd64</strong>. Λειτουργεί μόνο μετά από προσωρινό admin arm στον Broker 0.53.1. Καταναλώνει μία φορά το exact execution contract, επαληθεύει ξανά το prepared <code>.msh</code> και το approved MeshAgent, ζητά fresh 0-device start window και εκτελεί τον agent μόνο <strong>foreground / bounded ≤75″</strong>. Δεν χρησιμοποιεί <code>-install</code>, δεν δημιουργεί service/systemd και technician actions παραμένουν <strong>NOT AUTHORIZED</strong>. Δεν υπάρχει automatic retry.</p>
+<h2>Portal-bound bounded first-device execution — 3.17.2 diagnostics</h2>
+<p>Hard-pinned αποκλειστικά στο <strong>ID-34973 / amd64</strong>. Λειτουργεί μόνο μετά από προσωρινό admin arm σε συμβατό Broker execution gate. Η 3.17.2 προσθέτει metadata-only stage diagnostics χωρίς automatic retry. Καταναλώνει μία φορά το exact execution contract, επαληθεύει ξανά το prepared <code>.msh</code> και το approved MeshAgent, ζητά fresh 0-device start window και εκτελεί τον agent μόνο <strong>foreground / bounded ≤75″</strong>. Δεν χρησιμοποιεί <code>-install</code>, δεν δημιουργεί service/systemd και technician actions παραμένουν <strong>NOT AUTHORIZED</strong>. Δεν υπάρχει automatic retry.</p>
 <div class="mini-grid">
 <div><span>Κατάσταση</span><strong>{esc(fdx_label)}</strong></div>
 <div><span>Installation</span><strong>ID-34973 ONLY</strong></div>
-<div><span>Client / Arch</span><strong>3.17.1 / amd64</strong></div>
+<div><span>Client / Arch</span><strong>3.17.2 / amd64</strong></div>
 <div><span>Τελευταίο state</span><strong>{esc(fdx_time)}</strong></div>
 <div><span>Source fingerprint hint</span><strong>{esc(fdx_source)}</strong></div>
 <div><span>Immutable Mesh hint</span><strong>{esc(fdx_mesh)}</strong></div>
@@ -5145,6 +5203,12 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <div><span>Verified device count</span><strong>{esc(fdx_devices)}</strong></div>
 <div><span>Stable MeshAgent identity persisted</span><strong>{esc(fdx_identity)}</strong></div>
 <div><span>Ephemeral runtime cleanup</span><strong>{esc(fdx_cleanup)}</strong></div>
+<div><span>Diagnostic stage</span><strong>{esc(fdx_diag_stage)}</strong></div>
+<div><span>Broker endpoint</span><strong>{esc(fdx_diag_endpoint)}</strong></div>
+<div><span>Failure class</span><strong>{esc(fdx_failure_class)}</strong></div>
+<div><span>Watch calls</span><strong>{esc(fdx_watch_count)}</strong></div>
+<div><span>MeshAgent process started</span><strong>{esc(fdx_process_started)}</strong></div>
+<div><span>Final report</span><strong>{esc(fdx_report_state)}</strong></div>
 <div><span>Raw .msh / agent persisted</span><strong>ΟΧΙ / ΟΧΙ</strong></div>
 <div><span>Technician actions</span><strong>NOT AUTHORIZED</strong></div>
 </div>
@@ -5703,10 +5767,10 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </section>"""
 
     if VERSION == FIRST_DEVICE_EXECUTION_VERSION:
-        # 3.17.1 UI continuity hotfix: keep all previously built diagnostic/status
+        # 3.17.2 UI continuity hotfix: keep all previously built diagnostic/status
         # panels visible, but freeze every legacy mutation control. The server-side
         # POST guard below remains the authoritative safety boundary.
-        legacy_locked_note = '<div class="notice notice-info">3.17.1 UI continuity: τα προηγούμενα diagnostic/status panels παραμένουν ορατά. Οι legacy ενέργειες είναι κλειδωμένες όσο ισχύει το bounded first-device execution checkpoint.</div>'
+        legacy_locked_note = '<div class="notice notice-info">3.17.2 UI continuity: τα προηγούμενα diagnostic/status panels παραμένουν ορατά. Οι legacy ενέργειες είναι κλειδωμένες όσο ισχύει το bounded first-device execution checkpoint.</div>'
         enrollment_html = legacy_locked_note + enrollment_html
 
     return f"""<!doctype html>
@@ -5715,7 +5779,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <style>
 :root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;background:#10151d;color:#eef5ff;font:14px/1.5 Arial,Helvetica,sans-serif}}main{{max-width:1000px;margin:0 auto;padding:24px}}.hero{{background:#172231;border:1px solid #2c4158;border-radius:16px;padding:22px;margin-bottom:16px}}h1{{margin:0 0 5px;font-size:27px}}h2{{margin:0 0 10px;font-size:18px}}.sub{{color:#aab9ca}}.badge{{display:inline-block;margin-top:14px;padding:8px 12px;border-radius:999px;font-weight:700}}.ok{{background:#173a2a;color:#9ff0bd;border:1px solid #2c7750}}.bad{{background:#442128;color:#ffb5c0;border:1px solid #8c3d4d}}.warn{{background:#43381a;color:#ffe49a;border:1px solid #8b7331}}.note{{margin-top:15px;padding:13px 15px;border-radius:10px;background:#12293a;border:1px solid #245473;color:#cfeeff}}.notice{{margin:0 0 16px;padding:12px 14px;border-radius:10px}}.notice-ok{{background:#173a2a;border:1px solid #2c7750;color:#bdf7d0}}.notice-bad{{background:#442128;border:1px solid #8c3d4d;color:#ffd0d6}}.notice-info{{background:#12293a;border:1px solid #245473;color:#cfeeff}}.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.card,.pairbox{{background:#171d26;border:1px solid #293646;border-radius:12px;padding:15px}}.k{{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:#8fa1b5}}.v{{font-size:15px;font-weight:700;margin-top:4px;overflow-wrap:anywhere}}.pairbox{{margin:16px 0}}.pairbox p{{color:#b7c5d5}}label{{display:block;font-weight:700;margin:12px 0 6px}}input{{width:100%;max-width:460px;padding:11px 12px;border-radius:8px;border:1px solid #3b4c60;background:#0f151d;color:#fff;font:inherit}}button{{display:block;margin-top:12px;border:0;border-radius:8px;padding:10px 14px;background:#19aee8;color:#06131b;font-weight:800;cursor:pointer}}button:disabled,input:disabled{{opacity:.5;cursor:not-allowed}}code{{color:#9fdfff}}.mini-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.mini-grid div{{background:#111821;border:1px solid #28384a;border-radius:9px;padding:10px}}.mini-grid span{{display:block;color:#8fa1b5;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}}.mini-grid strong{{overflow-wrap:anywhere}}.footer{{margin-top:18px;color:#7f91a6;font-size:12px}}@media(max-width:650px){{main{{padding:14px}}.grid,.mini-grid{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.17.1 · Portal-Bound Bounded First-Device Execution Canary · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
+<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.17.2 · Portal-Bound Bounded First-Device Execution Canary · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
 {notice_html}
 {pair_html}
 {enrollment_html}
@@ -5747,12 +5811,12 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <div class="card"><div class="k">MeshCentral stable identity</div><div class="v">{esc(mesh_identity_label)} · generation {esc(mesh_identity_generation)} · runs {esc(mesh_identity_runs)} · DB {esc(mesh_identity_db_hint)} · {esc(mesh_identity_updated)}</div></div>
 <div class="card"><div class="k">Remote access</div><div class="v">Όχι — το node μπορεί να είναι online, αλλά web/Terminal/Files technician actions παραμένουν NOT AUTHORIZED</div></div>
 </section>
-<div class="footer">3.17.1 bounded first-device execution canary. Hard-pinned ID-34973 / amd64 / Broker 0.53.1. Απαιτεί προσωρινό admin arm, one-time execution/material delivery και fresh 0-device start verification. Εκτελεί μόνο foreground ≤75s, χωρίς -install/service persistence και χωρίς technician authorization. Δεν υπάρχει automatic retry.</div>
+<div class="footer">3.17.2 bounded first-device execution canary. Hard-pinned ID-34973 / amd64 / compatible Broker execution gate. Απαιτεί προσωρινό admin arm, one-time execution/material delivery και fresh 0-device start verification. Εκτελεί μόνο foreground ≤75s, χωρίς -install/service persistence και χωρίς technician authorization. Δεν υπάρχει automatic retry.</div>
 </main></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SmartProManaged/3.17.1"
+    server_version = "SmartProManaged/3.17.2"
 
     def _send(self, code, body, content_type):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
@@ -5868,7 +5932,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(403, render_page(read_policy(), "Η φόρμα ενεργοποίησης έληξε. Ανανεώστε τη σελίδα.", "bad"), "text/html; charset=utf-8")
             return
         if VERSION == FIRST_DEVICE_EXECUTION_VERSION and not is_first_device_execution:
-            self._send(409, render_page(read_policy(), "Η 3.17.1 είναι κλειδωμένο first-device execution checkpoint. Καμία legacy Managed ενέργεια δεν επιτρέπεται από αυτό το build.", "bad"), "text/html; charset=utf-8")
+            self._send(409, render_page(read_policy(), "Η 3.17.2 είναι κλειδωμένο first-device execution checkpoint. Καμία legacy Managed ενέργεια δεν επιτρέπεται από αυτό το build.", "bad"), "text/html; charset=utf-8")
             return
         if PERSISTENT_WORKER_ACTIVE and not (is_persistent_stop or is_group_migration_preflight or is_group_migration_target_settings or is_group_migration_canary or is_group_identity_reseed_canary or is_candidate_reconnect_canary or is_candidate_promotion):
             self._send(409, render_page(read_policy(), "Η continuous Managed λειτουργία είναι ενεργή. Επιτρέπονται μόνο ασφαλής τερματισμός ή οι verification-only migration έλεγχοι.", "bad"), "text/html; charset=utf-8")
@@ -6119,5 +6183,5 @@ if __name__ == "__main__":
         unattended_thread = threading.Thread(target=unattended_supervisor, name="managed-unattended-supervisor", daemon=True)
         unattended_thread.start()
     else:
-        print("[managed] 3.17.1 checkpoint lock: unattended supervisor NOT started; first-device execution requires explicit Broker arm + UI action", flush=True)
+        print("[managed] 3.17.2 checkpoint lock: unattended supervisor NOT started; first-device execution requires explicit Broker arm + UI action", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

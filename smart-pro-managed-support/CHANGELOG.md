@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.17.2
+- Diagnostic/reliability hotfix on top of 3.17.1; no automatic execution retry is introduced.
+- Persists only non-secret stage metadata for the first-device canary: diagnostic stage, Broker endpoint, failure class, watch count, process-started flag, and final-report status.
+- Adds stage logs around execution request/consume, agent consume, start gate, process launch, watch loop, identity persistence, report, and cleanup.
+- Keeps raw tickets, raw .msh, MeshAgent binary and node secrets out of diagnostics.
+- Keeps the existing no-retry guard authoritative; a failed/consumed 3.17.1 canary is not re-armed by this update.
+- No MeshAgent -install, service/systemd persistence, or technician Desktop/Terminal/Files authorization.
+
 ## 3.17.1
 - UI continuity hotfix over 3.17.0. Restores all previously built Managed diagnostic/status panels that 3.17.0 accidentally hid at render time.
 - Keeps every legacy mutation control visibly disabled during the first-device execution checkpoint; the existing server-side legacy POST block remains authoritative.

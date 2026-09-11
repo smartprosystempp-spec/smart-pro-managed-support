@@ -1,6 +1,6 @@
 name: "Smart Pro Managed Support"
-description: "UI-continuity hotfix for hard-pinned bounded first-device execution canary για ID-34973 / amd64. Broker-arm + one-time exact material + foreground MeshAgent ≤75s, χωρίς install/service/technician access."
-version: "3.17.1"
+description: "Diagnostic/reliability hotfix for the hard-pinned ID-34973 bounded first-device execution canary. Adds stage-level Broker transport diagnostics; no automatic retry, install/service, or technician access."
+version: "3.17.2"
 slug: "smart_pro_managed_support"
 arch:
   - amd64
