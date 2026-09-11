@@ -1,6 +1,6 @@
 name: "Smart Pro Managed Support"
 description: "First-device target-binding compatibility for ID-34973. Preserves the verified stable MeshAgent identity and unattended lifecycle while reconciling first-device and legacy migration MeshID hint namespaces; technician actions remain disabled."
-version: "3.17.6"
+version: "3.17.7"
 slug: "smart_pro_managed_support"
 arch:
   - amd64

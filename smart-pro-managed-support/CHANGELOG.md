@@ -1,3 +1,10 @@
+## 3.17.7 — First-Device Target Binding Continuity
+- Built directly from live 3.17.6 after successful unattended runtime + restart recovery + pause/restart QA, followed by a manual re-enable failure `persistent_target_binding_changed`.
+- Root cause: 3.17.6 detected first-device compatibility only while target binding/source hints were still empty. The first successful target runtime correctly hydrated those fields, so the next start no longer entered the compatibility path even though the durable first-device provenance was unchanged.
+- Fix: recognize the Portal-bound first-device target identity from `runtime_source=target`, no promotion state, persisted 16-hex provisioning mesh hint, and current 12-hex target `.msh` MeshID hint. Skip only that incompatible hint-namespace comparison.
+- All other target/source hints still compare exactly and `_validate_persisted_mesh_identity()` still requires the full SHA-256 binding over MeshName/MeshType/MeshID/ServerID/MeshServer/agentName.
+- No Broker change, no re-pair, no reseed, no MeshAgent install/service persistence, no technician actions.
+
 # Changelog
 
 ## 3.17.6 — First-Device Target Binding Compatibility
