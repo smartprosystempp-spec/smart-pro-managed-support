@@ -1,7 +1,7 @@
-# Smart Pro Managed Support 3.17.3
+# Smart Pro Managed Support 3.17.5
 
-Hard-pinned bounded first-device execution canary for the prepared Portal-bound `ID-34973` / `amd64` target.
+Continuous runtime lifecycle verification release for the hard-pinned ID-34973 QA installation.
 
-This build requires a compatible Broker execution gate, a fresh 3.17.3 Managed heartbeat, live Portal authorization, and an explicit 5-minute Broker admin arm. It consumes exactly one execution contract, re-verifies the exact prepared `.msh` and approved amd64 MeshAgent, starts only a foreground process for at most 75 seconds, and reports the observed exact-mesh device count.
+This release preserves the verified first-device result from 3.17.4 and the persisted stable MeshAgent identity. It unlocks only the already-proven unattended continuous-runtime start/stop path so restart/reconnect continuity can be verified using the same identity.
 
-No `-install`, no service/systemd persistence, no technician Desktop/Terminal/Files authorization, no automatic retry. Raw execution tickets, raw `.msh`, and the MeshAgent binary are not persisted. On a normal bounded completion, only the MeshAgent identity database is retained for later continuity testing.
+Safety boundary: no re-pair, no identity reseed, no first-device retry/reset, no MeshAgent `-install`, no service/systemd persistence, and technician Web/Terminal/Files/Desktop actions remain NOT AUTHORIZED.

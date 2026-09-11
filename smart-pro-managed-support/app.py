@@ -21,7 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.17.4")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.17.5")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -98,6 +98,7 @@ FIRST_DEVICE_MESH_HINT_RE = re.compile(r"^[a-f0-9]{16}$")
 FIRST_DEVICE_INSTALLATION = "ID-34973"
 FIRST_DEVICE_GROUP = "Smart Pro Managed — ID-34973"
 FIRST_DEVICE_EXECUTION_VERSION = "3.17.4"
+CONTINUOUS_LIFECYCLE_VERSION = "3.17.5"
 FIRST_DEVICE_EXECUTION_MAX_RUNTIME = 75
 FIRST_DEVICE_EXECUTION_SHUTDOWN_GRACE = 3
 MIN_AGENT_BYTES = 100000
@@ -5563,11 +5564,11 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </div>
 <form method="post" action="continuous-runtime-start">
 <input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
-<button type="submit" disabled{pstart_disabled}>Ενεργοποίηση unattended Managed runtime</button>
+<button type="submit"{pstart_disabled}>Ενεργοποίηση unattended Managed runtime</button>
 </form>
 <form method="post" action="continuous-runtime-stop">
 <input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">
-<button type="submit" disabled{pstop_disabled}>Παύση unattended Managed runtime</button>
+<button type="submit"{pstop_disabled}>Παύση unattended Managed runtime</button>
 </form>
 </section>"""
 
@@ -5897,7 +5898,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <style>
 :root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;background:#10151d;color:#eef5ff;font:14px/1.5 Arial,Helvetica,sans-serif}}main{{max-width:1000px;margin:0 auto;padding:24px}}.hero{{background:#172231;border:1px solid #2c4158;border-radius:16px;padding:22px;margin-bottom:16px}}h1{{margin:0 0 5px;font-size:27px}}h2{{margin:0 0 10px;font-size:18px}}.sub{{color:#aab9ca}}.badge{{display:inline-block;margin-top:14px;padding:8px 12px;border-radius:999px;font-weight:700}}.ok{{background:#173a2a;color:#9ff0bd;border:1px solid #2c7750}}.bad{{background:#442128;color:#ffb5c0;border:1px solid #8c3d4d}}.warn{{background:#43381a;color:#ffe49a;border:1px solid #8b7331}}.note{{margin-top:15px;padding:13px 15px;border-radius:10px;background:#12293a;border:1px solid #245473;color:#cfeeff}}.notice{{margin:0 0 16px;padding:12px 14px;border-radius:10px}}.notice-ok{{background:#173a2a;border:1px solid #2c7750;color:#bdf7d0}}.notice-bad{{background:#442128;border:1px solid #8c3d4d;color:#ffd0d6}}.notice-info{{background:#12293a;border:1px solid #245473;color:#cfeeff}}.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.card,.pairbox{{background:#171d26;border:1px solid #293646;border-radius:12px;padding:15px}}.k{{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:#8fa1b5}}.v{{font-size:15px;font-weight:700;margin-top:4px;overflow-wrap:anywhere}}.pairbox{{margin:16px 0}}.pairbox p{{color:#b7c5d5}}label{{display:block;font-weight:700;margin:12px 0 6px}}input{{width:100%;max-width:460px;padding:11px 12px;border-radius:8px;border:1px solid #3b4c60;background:#0f151d;color:#fff;font:inherit}}button{{display:block;margin-top:12px;border:0;border-radius:8px;padding:10px 14px;background:#19aee8;color:#06131b;font-weight:800;cursor:pointer}}button:disabled,input:disabled{{opacity:.5;cursor:not-allowed}}code{{color:#9fdfff}}.mini-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.mini-grid div{{background:#111821;border:1px solid #28384a;border-radius:9px;padding:10px}}.mini-grid span{{display:block;color:#8fa1b5;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}}.mini-grid strong{{overflow-wrap:anywhere}}.footer{{margin-top:18px;color:#7f91a6;font-size:12px}}@media(max-width:650px){{main{{padding:14px}}.grid,.mini-grid{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.17.4 · Controlled Retry Reset + Bounded First-Device Execution · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
+<section class="hero"><h1>Smart Pro Managed Support</h1><div class="sub">3.17.5 · Continuous Runtime Lifecycle Verification · {esc(ARCH)}</div><span class="badge {badge_class}">{esc(badge)}</span><div class="note">{esc(reason)}</div></section>
 {notice_html}
 {pair_html}
 {enrollment_html}
@@ -5929,12 +5930,12 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 <div class="card"><div class="k">MeshCentral stable identity</div><div class="v">{esc(mesh_identity_label)} · generation {esc(mesh_identity_generation)} · runs {esc(mesh_identity_runs)} · DB {esc(mesh_identity_db_hint)} · {esc(mesh_identity_updated)}</div></div>
 <div class="card"><div class="k">Remote access</div><div class="v">Όχι — το node μπορεί να είναι online, αλλά web/Terminal/Files technician actions παραμένουν NOT AUTHORIZED</div></div>
 </section>
-<div class="footer">3.17.4 controlled retry-reset consumer + bounded first-device execution client. Hard-pinned ID-34973 / amd64. Reset consume = one-time / authenticated / 0-device verified / NO EXECUTION. Later canary still requires explicit Broker admin arm and stays foreground ≤75s, χωρίς -install/service persistence ή technician authorization.</div>
+<div class="footer">3.17.5 continuous-runtime lifecycle verification. Preserves the verified 3.17.4 first-device proof and stable identity, enables only explicit unattended start/stop for reconnect/restart QA, and keeps technician actions NOT AUTHORIZED.</div>
 </main></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SmartProManaged/3.17.4"
+    server_version = "SmartProManaged/3.17.5"
 
     def _send(self, code, body, content_type):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
@@ -6052,6 +6053,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if VERSION == FIRST_DEVICE_EXECUTION_VERSION and not (is_first_device_execution or is_first_device_retry_reset):
             self._send(409, render_page(read_policy(), "Η 3.17.4 είναι κλειδωμένο controlled retry/reset checkpoint. Επιτρέπονται μόνο reset consume και αργότερα explicit armed first-device execution.", "bad"), "text/html; charset=utf-8")
+            return
+        if VERSION == CONTINUOUS_LIFECYCLE_VERSION and not (is_persistent_start or is_persistent_stop):
+            self._send(409, render_page(read_policy(), "Η 3.17.5 είναι κλειδωμένο continuous-runtime lifecycle checkpoint. Επιτρέπονται μόνο explicit unattended start/stop. Τα παλιά mutation/test actions παραμένουν ιστορικά και δεν επαναλαμβάνονται.", "bad"), "text/html; charset=utf-8")
             return
         if PERSISTENT_WORKER_ACTIVE and not (is_persistent_stop or is_group_migration_preflight or is_group_migration_target_settings or is_group_migration_canary or is_group_identity_reseed_canary or is_candidate_reconnect_canary or is_candidate_promotion):
             self._send(409, render_page(read_policy(), "Η continuous Managed λειτουργία είναι ενεργή. Επιτρέπονται μόνο ασφαλής τερματισμός ή οι verification-only migration έλεγχοι.", "bad"), "text/html; charset=utf-8")
@@ -6310,6 +6314,8 @@ if __name__ == "__main__":
     if VERSION != FIRST_DEVICE_EXECUTION_VERSION:
         unattended_thread = threading.Thread(target=unattended_supervisor, name="managed-unattended-supervisor", daemon=True)
         unattended_thread.start()
+        if VERSION == CONTINUOUS_LIFECYCLE_VERSION:
+            print("[managed] 3.17.5 lifecycle checkpoint: unattended supervisor available; explicit start/stop only; stable identity reuse required; technician_actions=false", flush=True)
     else:
         print("[managed] 3.17.4 checkpoint lock: unattended supervisor NOT started; controlled retry reset requires explicit UI consume; execution still requires later Broker arm + UI action", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

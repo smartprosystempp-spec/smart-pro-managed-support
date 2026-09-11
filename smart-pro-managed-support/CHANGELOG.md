@@ -1,5 +1,17 @@
 # Changelog
 
+## 3.17.5 — Continuous Runtime Lifecycle Unlock + Control UI Fix
+- Built directly from live-verified 3.17.4 after first-device PASS and restart identity persistence PASS.
+- Preserves the 3.17.4 first-device proof and stable MeshAgent identity; no reset/re-arm/reseed.
+- Leaves first-device execution ownership frozen at 3.17.4 and moves 3.17.5 into continuous-runtime lifecycle QA.
+- Starts the existing unattended supervisor again, but only after explicit admin enablement.
+- Fixes the persistent-runtime Start/Pause buttons, which were accidentally rendered with an unconditional HTML `disabled` attribute.
+- Adds a 3.17.5 POST safety gate: only unattended start/stop are accepted; historical mutation/test actions remain non-repeatable.
+- No MeshAgent -install, no service/systemd persistence, no technician Desktop/Terminal/Files authorization.
+- Broker 0.56.1 remains unchanged; generic Managed 3.x runtime contracts are reused.
+
+# Changelog
+
 ## 3.17.4 — Controlled Retry Proof Correction
 - Corrects the local reset-consume safety guard to require the actual preserved failed 3.17.1 execution proof.
 - Keeps Broker reset consume explicit/manual and execution DISARMED.

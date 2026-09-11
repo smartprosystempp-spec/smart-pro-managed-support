@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-VERSION="${SMART_PRO_MANAGED_VERSION:-3.17.2}"
+VERSION="${SMART_PRO_MANAGED_VERSION:-3.17.5}"
 PORT="8098"
 
 umask 077
@@ -14,7 +14,7 @@ echo "Κατάσταση: PER-INSTALLATION TARGET RUNTIME + DEDICATED API GATEWA
 echo "Το Ingress UI ακούει μόνο στο εσωτερικό port ${PORT}."
 echo "Ενεργά: verified per-installation target runtime + unattended renewable leases + dedicated Smart Pro API gateway endpoint."
 echo "Broker endpoint: https://api.smart-pro-system.gr/wp-json/smart-pro-remote/v1 — machine-to-machine μόνο. Identity/runtime source παραμένουν TARGET."
-echo "Checkpoint 3.17.2: bounded foreground first-device MeshAgent canary μόνο μετά από Broker admin arm. Ανενεργά: MeshAgent -install, service/systemd persistence, technician web/Terminal/Files/Desktop authorization. Raw execution tickets/.msh/binary δεν αποθηκεύονται."
+echo "Checkpoint 3.17.5: continuous runtime lifecycle verification με reuse-only stable identity. Επιτρέπεται μόνο explicit unattended start/stop για reconnect/restart QA. Ανενεργά: MeshAgent -install, service/systemd persistence, technician web/Terminal/Files/Desktop authorization."
 echo "===================================================="
 
 exec python3 /opt/smart-pro/app.py

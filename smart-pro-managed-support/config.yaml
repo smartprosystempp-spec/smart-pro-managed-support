@@ -1,6 +1,6 @@
 name: "Smart Pro Managed Support"
-description: "Controlled retry-reset proof correction for ID-34973. Preserves the real failed 3.17.1 proof, consumes Broker 0.56.1 reset only by explicit UI action, and keeps execution disarmed until a later admin arm."
-version: "3.17.4"
+description: "Continuous runtime lifecycle verification for ID-34973. Preserves the verified 3.17.4 first-device proof and stable identity, enables explicit unattended start/stop with reuse-only identity, and keeps technician actions disabled."
+version: "3.17.5"
 slug: "smart_pro_managed_support"
 arch:
   - amd64
