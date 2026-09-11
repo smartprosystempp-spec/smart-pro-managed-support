@@ -1,16 +1,43 @@
-# Smart Pro Managed Support 3.18.0 — UI / Diagnostic Archive
+# Smart Pro Managed Support
 
-3.18.0 is a presentation and documentation release over the verified 3.17.7 unattended lifecycle.
+## Τι είναι
+Το Smart Pro Managed Support διατηρεί μια σταθερή, ελεγχόμενη ταυτότητα υποστήριξης για τη συγκεκριμένη εγκατάσταση Home Assistant. Όταν η τοπική πολιτική και η εξουσιοδότηση του Broker είναι έγκυρες, μπορεί να διατηρεί τη Managed σύνδεση διαθέσιμη και να επανασυνδέεται αυτόματα μετά από restart του πρόσθετου.
 
-The everyday view now prioritizes current authorization/runtime health, unattended state, lease/reconnect counters, expected stable node and the next safe action. The active unattended runtime controls remain outside collapsed sections.
+Η παρουσία ενός online node **δεν σημαίνει** ότι έχουν δοθεί δικαιώματα Web / Terminal / Files / Desktop σε τεχνικό. Αυτά παραμένουν ξεχωριστά κλειδωμένα.
 
-All prior diagnostic/checkpoint cards remain available under collapsible groups:
-- Diagnostic chain tools — enrollment, secure settings, MeshAgent binary and runtime-lease dry-run.
-- Identity/connectivity diagnostics — bounded identity-continuity canary.
-- Provisioning / Migration / Recovery — preflight, target settings, migration canary, identity reseed, candidate reconnect and permanent promotion.
-- Completed first-device checkpoints — Portal-bound settings and controlled retry/reset + bounded first-device execution.
-- Detailed Policy & Authorization — the original low-level status grid.
+## Καθημερινή οθόνη
+Η αρχική οθόνη δείχνει πρώτα:
+- ID εγκατάστασης,
+- αν η αλυσίδα εξουσιοδότησης είναι ολοκληρωμένη,
+- την κατάσταση της Managed σύνδεσης,
+- health / τελευταίο reason,
+- αν είναι ενεργή η αυτόματη επανασύνδεση,
+- renewals και reconnects.
 
-Archived actions are UI-disabled and also blocked by the 3.18.0 server-side POST safety gate. They are retained as forensic history and future maintenance tooling, not as routine buttons.
+Η κάρτα **Μόνιμη Managed σύνδεση** είναι η μόνη καθημερινή λειτουργική κάρτα. Τα πιο τεχνικά στοιχεία — stable node, server watch, health report, runtime lease, identity mode και cleanup — ανοίγουν από το **Τεχνικά στοιχεία runtime**.
 
-The customer-facing Managed onboarding/activation flow is intentionally out of scope for 3.18.0 and will be designed separately around Portal-owned installation activation.
+## Μετά από επανεκκίνηση ή update
+Αν η αυτόματη επανασύνδεση είναι ενεργή, είναι φυσιολογικό να εμφανιστεί προσωρινά **«Αναμονή αυτόματης επανασύνδεσης»**. Το πρόσθετο περιμένει έγκυρη local + server authorization και προσπαθεί να επαναφέρει το ίδιο stable node.
+
+Μην πατάτε επαναλαμβανόμενα ενεργοποίηση/παύση όσο βρίσκεται σε αυτή την κατάσταση. Αν υπάρχει πραγματικό πρόβλημα, ελέγξτε πρώτα το **Αρχείο καταγραφής** του Home Assistant.
+
+## Διαγνωστικά εργαλεία
+Τα παλαιότερα diagnostics, migration/recovery εργαλεία και first-device checkpoints δεν έχουν διαγραφεί. Βρίσκονται σε αναδιπλούμενες ενότητες ώστε να είναι διαθέσιμα σε μελλοντικό incident χωρίς να γεμίζουν την καθημερινή οθόνη.
+
+Κάθε εργαλείο αναφέρει:
+- τι επίδραση έχει,
+- πότε χρησιμοποιείται,
+- ποιες είναι οι προϋποθέσεις,
+- αν επιτρέπεται επανάληψη,
+- πώς ερμηνεύεται PASS/FAIL.
+
+Στη stable 3.18.1 οι ιστορικές mutation/test ενέργειες είναι κλειδωμένες. Η κατάσταση και η τεκμηρίωσή τους παραμένουν διαθέσιμες για forensic troubleshooting.
+
+## Αν κάτι φαίνεται Offline ή FAILED
+1. Μην κάνετε re-pair, reseed ή διαγραφή `/data`.
+2. Μην επαναλαμβάνετε one-time diagnostic/mutation actions.
+3. Ανοίξτε **Αρχείο καταγραφής** και εξαγάγετε το σχετικό Home Assistant log.
+4. Ελέγξτε το Broker diagnostic για την ίδια Installation ID όταν χρειάζεται server-side συσχέτιση.
+
+## Αρχική ενεργοποίηση πελάτη
+Η τελική customer-facing ενεργοποίηση δεν αποτελεί μέρος της 3.18.1. Η παλιά τεχνική pairing φόρμα παραμένει κλειδωμένη ως ιστορική αναφορά. Η μελλοντική ροή θα σχεδιαστεί ξεχωριστά γύρω από το Customer Portal και one-time activation.

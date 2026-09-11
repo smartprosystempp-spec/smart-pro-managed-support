@@ -1,3 +1,15 @@
+## 3.18.1 — Presentation & Documentation Polish
+- Presentation/documentation-only polish over 3.18.0.
+- Rewrites Home Assistant add-on description and documentation as customer/support-facing content instead of release notes.
+- Removes the 3.17.7 baseline wording from the everyday Add-on Store presentation.
+- Greek-first operational labels and collapsible section names.
+- Shows «Αναμονή αυτόματης επανασύνδεσης» during the normal post-restart recovery window when unattended mode is enabled.
+- Simplifies the top summary and moves stable-node / lease / identity internals under «Τεχνικά στοιχεία runtime».
+- Gives Enable/Pause controls clearer visual hierarchy.
+- Removes the permanent UI-only release-note banner from the everyday Ingress screen.
+- Historical diagnostics remain documented and locked; customer activation remains out of scope.
+- No runtime algorithm, lease/reconnect logic, identity validation, Broker protocol, MeshAgent execution path, permissions, or persistence change.
+
 ## 3.18.0 — UI Consolidation & Diagnostic Archive
 - UI-only consolidation over the live-verified 3.17.7 ID-34973 lifecycle baseline.
 - Adds compact Current State / Next Action operational snapshot.
