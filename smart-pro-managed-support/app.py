@@ -21,7 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.18.1")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.18.2")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -98,7 +98,7 @@ FIRST_DEVICE_MESH_HINT_RE = re.compile(r"^[a-f0-9]{16}$")
 FIRST_DEVICE_INSTALLATION = "ID-34973"
 FIRST_DEVICE_GROUP = "Smart Pro Managed — ID-34973"
 FIRST_DEVICE_EXECUTION_VERSION = "3.17.4"
-CONTINUOUS_LIFECYCLE_VERSION = "3.18.1"
+CONTINUOUS_LIFECYCLE_VERSION = "3.18.2"
 FIRST_DEVICE_EXECUTION_MAX_RUNTIME = 75
 FIRST_DEVICE_EXECUTION_SHUTDOWN_GRACE = 3
 MIN_AGENT_BYTES = 100000
@@ -5180,7 +5180,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         activation_locked = VERSION == CONTINUOUS_LIFECYCLE_VERSION
         disabled = "" if (local_allowed and not activation_locked) else " disabled"
         activation_note = (
-            '<div class="tool-lock">3.18.1: η παλιά τεχνική pairing φόρμα παραμένει ορατή μόνο ως αναφορά και είναι κλειδωμένη. '
+            '<div class="tool-lock">3.18.2: η παλιά τεχνική pairing φόρμα παραμένει ορατή μόνο ως αναφορά και είναι κλειδωμένη. '
             'Το customer onboarding / Portal activation θα υλοποιηθεί ως ξεχωριστή ροή.</div>'
             if activation_locked else ""
         )
@@ -5959,7 +5959,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
     def freeze_archived_actions(card_html):
         if not card_html:
             return ""
-        # UI-only safety layer. The 3.18.1 server-side POST gate remains authoritative.
+        # UI-only safety layer. The 3.18.2 server-side POST gate remains authoritative.
         return re.sub(r'<button type="submit"(?![^>]*\bdisabled\b)', '<button type="submit" disabled', card_html)
 
     def archived_tool(card_html, mode, when, prerequisites, rerun, meaning):
@@ -5967,7 +5967,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
             return ""
         documented = annotate_tool(card_html, mode, when, prerequisites, rerun, meaning)
         locked = freeze_archived_actions(documented)
-        return locked.replace('</h2>', '</h2><div class="tool-lock">Αρχειοθετημένο εργαλείο: η κατάσταση και η τεκμηρίωση διατηρούνται, αλλά η εκτέλεση είναι κλειδωμένη στην 3.18.1. Επανενεργοποίηση μόνο σε ελεγχόμενο maintenance checkpoint.</div>', 1)
+        return locked.replace('</h2>', '</h2><div class="tool-lock">Αρχειοθετημένο εργαλείο: η κατάσταση και η τεκμηρίωση διατηρούνται, αλλά η εκτέλεση είναι κλειδωμένη στην 3.18.2. Επανενεργοποίηση μόνο σε ελεγχόμενο maintenance checkpoint.</div>', 1)
 
     def collapsible(title, subtitle, body, count_label):
         if not body.strip():
@@ -5983,7 +5983,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "Verification-only / ephemeral one-time authorization ticket",
         "Όταν η Broker authorization ή το enrollment contract φαίνεται ασυνεπές.",
         "Paired Managed identity, local policy ALLOWED και έγκυρο server authorization.",
-        "Κλειδωμένο στην 3.18.1. Επανεκτέλεση μόνο σε maintenance build.",
+        "Κλειδωμένο στην 3.18.2. Επανεκτέλεση μόνο σε maintenance build.",
         "VERIFIED = το enrollment contract είναι έγκυρο. FAILED = δεν συνεχίζουμε σε runtime· ελέγχουμε Broker και logs.",
     )
     settings_html = archived_tool(
@@ -5991,7 +5991,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "Verification-only / raw .msh memory-only",
         "Για έλεγχο ότι το secure settings contract αντιστοιχεί στη σωστή εγκατάσταση και identity.",
         "Έγκυρο enrollment authorization και paired identity.",
-        "Κλειδωμένο στην 3.18.1. Δεν γίνεται blind retry one-time consume.",
+        "Κλειδωμένο στην 3.18.2. Δεν γίνεται blind retry one-time consume.",
         "VERIFIED = format/integrity/source συμφωνούν. FAILED = stop/fail-closed και έλεγχος contract.",
     )
     agent_html = archived_tool(
@@ -5999,7 +5999,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "Verification-only / binary downloaded προσωρινά, ποτέ execution",
         "Για διάγνωση architecture, SHA, ELF και εγκεκριμένου MeshAgent binary.",
         "Verified settings chain και σωστό architecture.",
-        "Κλειδωμένο στην 3.18.1. Χρήση μόνο με ρητό maintenance scope.",
+        "Κλειδωμένο στην 3.18.2. Χρήση μόνο με ρητό maintenance scope.",
         "VERIFIED = binary integrity/architecture σωστά. FAILED = δεν επιτρέπεται execution.",
     )
     runtime_html = archived_tool(
@@ -6007,7 +6007,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "Verification-only / short runtime lease + μία renewal / no MeshAgent",
         "Για διάγνωση του lease contract χωρίς πραγματική MeshCentral εκτέλεση.",
         "Verified authorization/settings/agent chain.",
-        "Κλειδωμένο στην 3.18.1. Δεν απαιτείται για καθημερινή λειτουργία.",
+        "Κλειδωμένο στην 3.18.2. Δεν απαιτείται για καθημερινή λειτουργία.",
         "Renewed once = το lease pipeline λειτουργεί. Failure = ελέγχουμε authorization/gateway πριν από runtime.",
     )
     canary_html = archived_tool(
@@ -6015,7 +6015,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "Controlled foreground execution ≤45s / identity continuity",
         "Μόνο όταν χρειάζεται να αποδειχθεί ξανά ότι χρησιμοποιείται η ίδια MeshCentral identity.",
         "Verified chain, stable identity και ρητό maintenance approval.",
-        "Κλειδωμένο στην 3.18.1. Όχι επανάληψη ως routine test.",
+        "Κλειδωμένο στην 3.18.2. Όχι επανάληψη ως routine test.",
         "VERIFIED = ίδια identity/node και cleanup σωστό. FAILED = δεν κάνουμε νέο canary πριν διαβάσουμε logs/state.",
     )
     migration_preflight_html = archived_tool(
@@ -6023,7 +6023,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "Read-only authenticated preflight / no node move",
         "Για έλεγχο per-installation target group/controller binding πριν από migration/recovery εργασία.",
         "Paired identity, valid authorization και υπάρχον stable node.",
-        "Κλειδωμένο στην 3.18.1. Μπορεί να επανενεργοποιηθεί μελλοντικά ως ασφαλές diagnostic.",
+        "Κλειδωμένο στην 3.18.2. Μπορεί να επανενεργοποιηθεί μελλοντικά ως ασφαλές diagnostic.",
         "VERIFIED = profile/group/controller/identity συμφωνούν. FAILED = δεν επιτρέπεται migration action.",
     )
     migration_target_settings_html = archived_tool(
@@ -6031,7 +6031,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "Verification-only / target .msh memory-only / no execution",
         "Για επιβεβαίωση του exact per-installation target configuration.",
         "Verified migration preflight και server authorization.",
-        "Κλειδωμένο στην 3.18.1. One-time material δεν καταναλώνεται ξανά χωρίς σχεδιασμό.",
+        "Κλειδωμένο στην 3.18.2. One-time material δεν καταναλώνεται ξανά χωρίς σχεδιασμό.",
         "VERIFIED = target settings αντιστοιχούν στην εγκατάσταση. FAILED = σταματάμε πριν από runtime source change.",
     )
     migration_canary_html = archived_tool(
@@ -6039,7 +6039,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "Controlled migration execution / προσωρινό runtime-source switch",
         "Μόνο για ειδική διερεύνηση migration continuity με παρακολούθηση MeshCentral.",
         "Verified target settings, stable identity και explicit maintenance checkpoint.",
-        "Κλειδωμένο στην 3.18.1. Δεν είναι routine diagnostic και δεν γίνεται blind rerun.",
+        "Κλειδωμένο στην 3.18.2. Δεν είναι routine diagnostic και δεν γίνεται blind rerun.",
         "PASS = ίδια stable συσκευή εμφανίζεται στον target χώρο και επιστρέφει σωστά. Failure = stop και forensic review.",
     )
     identity_reseed_html = archived_tool(
@@ -6047,7 +6047,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "State-changing / δημιουργεί quarantined candidate identity",
         "Μόνο για recovery όταν υπάρχει τεκμηριωμένη ανάγκη νέας candidate identity.",
         "Verified target chain, backup/rollback plan και ρητή τεχνική έγκριση.",
-        "Κλειδωμένο στην 3.18.1. One-shot style workflow — ποτέ αυθόρμητη επανάληψη.",
+        "Κλειδωμένο στην 3.18.2. One-shot style workflow — ποτέ αυθόρμητη επανάληψη.",
         "VERIFIED = candidate δημιουργήθηκε χωρίς να χαθεί η παλιά identity. FAILED = διατηρούμε rollback και δεν προωθούμε candidate.",
     )
     candidate_reconnect_html = archived_tool(
@@ -6055,7 +6055,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "Controlled execution / reconnect υπάρχουσας quarantined candidate",
         "Για να αποδειχθεί ότι η ίδια candidate επανασυνδέεται χωρίς duplicate node.",
         "Υπάρχουσα verified candidate και intact shared rollback identity.",
-        "Κλειδωμένο στην 3.18.1. Χρήση μόνο πριν από ειδικά σχεδιασμένη promotion/recovery εργασία.",
+        "Κλειδωμένο στην 3.18.2. Χρήση μόνο πριν από ειδικά σχεδιασμένη promotion/recovery εργασία.",
         "VERIFIED = ίδια candidate online, χωρίς νέα συσκευή. FAILED = δεν προχωρά permanent promotion.",
     )
     promotion_html = archived_tool(
@@ -6063,7 +6063,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "High-impact state change / permanent local identity promotion",
         "Μόνο όταν υπάρχει verified candidate και έχει εγκριθεί permanent target runtime promotion.",
         "Verified reconnect proof, rollback backup και ρητή τεχνική απόφαση.",
-        "Κλειδωμένο στην 3.18.1. Ποτέ ως diagnostic retry.",
+        "Κλειδωμένο στην 3.18.2. Ποτέ ως diagnostic retry.",
         "PASS = target identity γίνεται stable και rollback παραμένει διαθέσιμο. Failure = αποκατάσταση rollback και πλήρης έλεγχος logs.",
     )
     first_device_settings_html = archived_tool(
@@ -6071,7 +6071,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "Historical one-time first-device settings verification",
         "Μόνο για forensic αναφορά του αρχικού ID-34973 first-device provisioning checkpoint.",
         "Exact historical scope ID-34973 / amd64.",
-        "Ολοκληρωμένο checkpoint — δεν επαναλαμβάνεται στην 3.18.1.",
+        "Ολοκληρωμένο checkpoint — δεν επαναλαμβάνεται στην 3.18.2.",
         "VERIFIED = το αρχικό Portal-bound .msh contract είχε επιβεβαιωθεί χωρίς execution.",
     )
     first_device_execution_html = archived_tool(
@@ -6084,7 +6084,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
     )
 
     if identity is None:
-        next_action = "Η 3.18.1 δεν ανοίγει νέα Managed identity. Η αρχική ενεργοποίηση πελάτη θα σχεδιαστεί ξεχωριστά μέσω Portal."
+        next_action = "Η 3.18.2 δεν ανοίγει νέα Managed identity. Η αρχική ενεργοποίηση πελάτη θα σχεδιαστεί ξεχωριστά μέσω Portal."
     elif not local_allowed:
         next_action = "Ελέγξτε πρώτα την local policy / subscription κατάσταση. Το runtime παραμένει fail-closed."
     elif not server_allowed:
@@ -6179,7 +6179,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SmartProManaged/3.18.1"
+    server_version = "SmartProManaged/3.18.2"
 
     def _send(self, code, body, content_type):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
@@ -6299,7 +6299,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(409, render_page(read_policy(), "Η 3.17.4 είναι κλειδωμένο controlled retry/reset checkpoint. Επιτρέπονται μόνο reset consume και αργότερα explicit armed first-device execution.", "bad"), "text/html; charset=utf-8")
             return
         if VERSION == CONTINUOUS_LIFECYCLE_VERSION and not (is_persistent_start or is_persistent_stop):
-            self._send(409, render_page(read_policy(), "Η 3.18.1 είναι stable presentation/documentation checkpoint. Επιτρέπονται μόνο explicit unattended start/stop. Τα παλιά mutation/test actions παραμένουν αρχειοθετημένα και δεν επαναλαμβάνονται.", "bad"), "text/html; charset=utf-8")
+            self._send(409, render_page(read_policy(), "Η 3.18.2 είναι stable multi-architecture checkpoint. Επιτρέπονται μόνο explicit unattended start/stop. Τα παλιά mutation/test actions παραμένουν αρχειοθετημένα και δεν επαναλαμβάνονται.", "bad"), "text/html; charset=utf-8")
             return
         if PERSISTENT_WORKER_ACTIVE and not (is_persistent_stop or is_group_migration_preflight or is_group_migration_target_settings or is_group_migration_canary or is_group_identity_reseed_canary or is_candidate_reconnect_canary or is_candidate_promotion):
             self._send(409, render_page(read_policy(), "Η continuous Managed λειτουργία είναι ενεργή. Επιτρέπονται μόνο ασφαλής τερματισμός ή οι verification-only migration έλεγχοι.", "bad"), "text/html; charset=utf-8")
@@ -6559,7 +6559,7 @@ if __name__ == "__main__":
         unattended_thread = threading.Thread(target=unattended_supervisor, name="managed-unattended-supervisor", daemon=True)
         unattended_thread.start()
         if VERSION == CONTINUOUS_LIFECYCLE_VERSION:
-            print("[managed] 3.18.1 presentation/documentation polish: unattended supervisor available; explicit start/stop only; stable identity reuse required; archived actions locked; technician_actions=false", flush=True)
+            print("[managed] 3.18.2 multi-architecture compatibility: unattended supervisor available; explicit start/stop only; stable identity reuse required; archived actions locked; technician_actions=false", flush=True)
     else:
         print("[managed] 3.17.4 checkpoint lock: unattended supervisor NOT started; controlled retry reset requires explicit UI consume; execution still requires later Broker arm + UI action", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

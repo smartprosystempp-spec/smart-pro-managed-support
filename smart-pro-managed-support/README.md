@@ -1,25 +1,24 @@
-# Smart Pro Managed Support 3.18.1
+# Smart Pro Managed Support 3.18.2
 
 Το **Smart Pro Managed Support** είναι το πρόσθετο μόνιμης, ελεγχόμενης υποστήριξης του Smart Pro System για Home Assistant.
 
-Η 3.18.1 είναι έκδοση **παρουσίασης και τεκμηρίωσης**. Δεν αλλάζει τη λειτουργία της σταθερής MeshCentral ταυτότητας, τα renewable runtime leases, την αυτόματη επανασύνδεση, το fail-closed behavior ή το πρωτόκολλο του Broker.
+Η 3.18.2 είναι μικρή έκδοση **multi-architecture compatibility** πάνω στην επαληθευμένη 3.18.1. Το ίδιο add-on δηλώνεται πλέον για **amd64 και aarch64**, ώστε η σταθερή Managed γραμμή να μπορεί να χρησιμοποιηθεί τόσο στο QA VM όσο και σε Home Assistant Green/ARM64 εγκαταστάσεις χωρίς ξεχωριστό fork.
 
-## Τι βελτιώνει
-- Ελληνική και πιο καθαρή καθημερινή οθόνη.
-- Συνοπτική «Σύνοψη λειτουργίας» με τα στοιχεία που χρειάζονται πραγματικά στην καθημερινή χρήση.
-- Η κύρια «Μόνιμη Managed σύνδεση» ξεχωρίζει από τα ιστορικά diagnostics.
-- Τα τεχνικά runtime στοιχεία μετακινούνται σε αναδιπλούμενη ενότητα.
-- Η κατάσταση μετά από restart εμφανίζεται ως «Αναμονή αυτόματης επανασύνδεσης» αντί να μοιάζει σαν να μην έχει ξεκινήσει ποτέ.
-- Τα ιστορικά εργαλεία παραμένουν διαθέσιμα, τεκμηριωμένα και κλειδωμένα.
-- Η τεκμηρίωση του Home Assistant είναι πλέον customer/support oriented αντί για release-note oriented.
+## Τι αλλάζει
+- Το Home Assistant add-on metadata υποστηρίζει `amd64` και `aarch64`.
+- Το stable 3.18 lifecycle gate μεταφέρεται στην 3.18.2 ώστε η αυτόματη επανασύνδεση και τα explicit Enable/Pause controls να λειτουργούν κανονικά μετά το version bump.
+- Το Docker build-version fallback ενημερώνεται στην 3.18.2.
+- Η υπάρχουσα runtime υλοποίηση συνεχίζει να επιλέγει και να επαληθεύει το σωστό MeshAgent binary ανά architecture.
 
 ## Τι δεν αλλάζει
 - Δεν γίνεται re-pair ή reseed.
 - Δεν δημιουργείται νέο MeshCentral node από το update.
-- Δεν αλλάζει το target binding.
-- Δεν αλλάζει η λογική leases / reconnect / Broker authorization.
+- Δεν αλλάζει το per-installation target group ή το persisted MeshAgent identity.
+- Δεν αλλάζει η λογική renewable leases / reconnect / Broker authorization.
+- Δεν αλλάζουν MeshCentral permissions.
 - Δεν χρησιμοποιείται MeshAgent `-install`.
 - Δεν δημιουργείται service/systemd persistence.
 - Web / Terminal / Files / Desktop για τεχνικό παραμένουν **NOT AUTHORIZED**.
+- Τα ιστορικά first-device εργαλεία παραμένουν αρχειοθετημένα και κλειδωμένα· τα παλιά amd64-only checkpoints δεν γίνονται multi-arch.
 
-Τα Home Assistant logs παραμένουν το βασικό client-side διαγνωστικό αρχείο. Δεν προστίθεται δεύτερο diagnostic ZIP exporter σε αυτή την έκδοση.
+Η έκδοση προορίζεται για **update-in-place**. Δεν γίνεται uninstall, διαγραφή `/data`, νέο pairing ή χειροκίνητη μετακίνηση/διαγραφή MeshCentral node.

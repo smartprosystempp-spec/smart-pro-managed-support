@@ -1,3 +1,11 @@
+## 3.18.2 — Multi-Architecture Compatibility
+- Adds Home Assistant add-on support for both `amd64` and `aarch64`.
+- Moves the stable continuous-lifecycle version gate from 3.18.1 to 3.18.2 so update-in-place retains unattended supervisor recovery and the explicit Start/Pause-only POST boundary.
+- Keeps the existing architecture-aware MeshAgent delivery/ELF verification path (`amd64` = e_machine 62, `aarch64` = e_machine 183).
+- Keeps historical first-device QA/checkpoint actions locked to their original ID-34973/amd64 scope; no archived mutation action is generalized to ARM.
+- No runtime algorithm, renewable lease/reconnect behavior, persisted identity validation, Broker protocol, MeshCentral permission, node lifecycle, `-install`, service persistence or technician authorization change.
+- Intended first ARM migration checkpoint: existing ID-95948 Home Assistant Green / 3.15.3 -> 3.18.2 in place, preserving the same per-installation group and stable node identity.
+
 ## 3.18.1 — Presentation & Documentation Polish
 - Presentation/documentation-only polish over 3.18.0.
 - Rewrites Home Assistant add-on description and documentation as customer/support-facing content instead of release notes.
