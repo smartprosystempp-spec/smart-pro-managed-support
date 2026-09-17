@@ -2,6 +2,7 @@
 import base64
 import binascii
 import hashlib
+import http.client
 import html
 import json
 import os
@@ -15,13 +16,14 @@ import tempfile
 import threading
 import time
 from datetime import datetime, timezone
+import ipaddress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.18.2")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.19.0")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -29,6 +31,33 @@ BROKER_BASE = os.environ.get(
     "https://api.smart-pro-system.gr/wp-json/smart-pro-remote/v1",
 ).rstrip("/")
 POLICY_FILE = Path("/share/smart-pro-system/managed-policy.json")
+ROUTER_NETWORK_FILE = Path(
+    "/share/smart-pro-system/managed-network.json"
+)
+ROUTER_NETWORK_CONTRACT = "smart-pro-managed-network-v1"
+ROUTER_NETWORK_VERSION = 1
+ROUTER_COMPAT_HOST = "127.0.0.1"
+ROUTER_COMPAT_PORT = 18080
+ROUTER_TARGET_PORT = 80
+ROUTER_HTTP_TIMEOUT = 6
+ROUTER_MAX_REQUEST_BODY = 262144
+ROUTER_MAX_RESPONSE_BODY = 8 * 1024 * 1024
+ROUTER_HOP_HEADERS = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
+ROUTER_MAX_CONTRACT_BYTES = 65536
+ROUTER_RFC1918 = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
 DATA_DIR = Path("/data")
 IDENTITY_FILE = DATA_DIR / "managed-identity.json"
 ENROLLMENT_STATE_FILE = DATA_DIR / "enrollment-authorization.json"
@@ -98,7 +127,7 @@ FIRST_DEVICE_MESH_HINT_RE = re.compile(r"^[a-f0-9]{16}$")
 FIRST_DEVICE_INSTALLATION = "ID-34973"
 FIRST_DEVICE_GROUP = "Smart Pro Managed — ID-34973"
 FIRST_DEVICE_EXECUTION_VERSION = "3.17.4"
-CONTINUOUS_LIFECYCLE_VERSION = "3.18.2"
+CONTINUOUS_LIFECYCLE_VERSION = "3.19.0"
 FIRST_DEVICE_EXECUTION_MAX_RUNTIME = 75
 FIRST_DEVICE_EXECUTION_SHUTDOWN_GRACE = 3
 MIN_AGENT_BYTES = 100000
@@ -168,6 +197,267 @@ def _as_int(value):
 def _safe_str(value, max_len=300):
     value = str(value or "").strip()
     return value[:max_len]
+
+
+def load_router_network_contract():
+    try:
+        st = ROUTER_NETWORK_FILE.lstat()
+    except OSError as exc:
+        raise RuntimeError("router_network_contract_unavailable") from exc
+
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        raise RuntimeError("router_network_contract_type_invalid")
+
+    if st.st_size <= 0 or st.st_size > ROUTER_MAX_CONTRACT_BYTES:
+        raise RuntimeError("router_network_contract_size_invalid")
+
+    try:
+        with ROUTER_NETWORK_FILE.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("router_network_contract_invalid") from exc
+
+    if data.get("contract_id") != ROUTER_NETWORK_CONTRACT:
+        raise RuntimeError("router_network_contract_id_mismatch")
+
+    if _as_int(data.get("network_version")) != ROUTER_NETWORK_VERSION:
+        raise RuntimeError("router_network_contract_version_mismatch")
+
+    if data.get("state") != "ready":
+        raise RuntimeError("router_network_contract_not_ready")
+
+    health = data.get("health") or {}
+    if (
+        health.get("host_network_expected") is not True
+        or health.get("route_source_readable") is not True
+    ):
+        raise RuntimeError("router_network_health_invalid")
+
+    router = data.get("router_candidate") or {}
+    raw_gateway = _safe_str(router.get("gateway_ipv4"), 64)
+
+    try:
+        gateway = ipaddress.ip_address(raw_gateway)
+    except ValueError as exc:
+        raise RuntimeError("router_gateway_invalid") from exc
+
+    if (
+        gateway.version != 4
+        or not any(gateway in network for network in ROUTER_RFC1918)
+        or gateway.is_loopback
+        or gateway.is_link_local
+        or gateway.is_multicast
+        or gateway.is_unspecified
+    ):
+        raise RuntimeError("router_gateway_not_allowed")
+
+    live = data.get("liveness") or {}
+    refresh = _as_int(live.get("refresh_seconds"))
+    lease = _as_int(live.get("lease_seconds"))
+
+    if (
+        refresh is None or lease is None
+        or refresh < 5
+        or lease < refresh
+        or lease > 900
+    ):
+        raise RuntimeError("router_network_liveness_invalid")
+
+    age = max(0.0, time.time() - st.st_mtime)
+    if age > lease:
+        raise RuntimeError("router_network_contract_expired")
+
+    return {
+        "gateway_ipv4": str(gateway),
+        "target_port": ROUTER_TARGET_PORT,
+        "interface": _safe_str(router.get("interface"), 64),
+        "refresh_seconds": refresh,
+        "lease_seconds": lease,
+        "age_seconds": age,
+    }
+
+
+def router_rewrite_location(value, gateway):
+    value = _safe_str(value, 4096)
+    gateway = _safe_str(gateway, 64)
+
+    if not value or not gateway:
+        return value
+
+    parsed = urlparse(value)
+
+    if (
+        parsed.scheme in ("http", "https")
+        and parsed.hostname == gateway
+    ):
+        path = parsed.path or "/"
+
+        if parsed.query:
+            path += "?" + parsed.query
+
+        if parsed.fragment:
+            path += "#" + parsed.fragment
+
+        return path
+
+    return value
+
+
+def router_rewrite_referer(value, gateway):
+    gateway = _safe_str(gateway, 64)
+
+    if not gateway:
+        return ""
+
+    value = _safe_str(value, 4096)
+
+    if not value:
+        return "http://" + gateway + "/"
+
+    parsed = urlparse(value)
+    path = parsed.path or "/"
+
+    if not path.startswith("/"):
+        path = "/"
+
+    if parsed.query:
+        path += "?" + parsed.query
+
+    return "http://" + gateway + path
+
+
+def router_validate_request_path(value):
+    value = _safe_str(value, 4096)
+
+    if not value or not value.startswith("/"):
+        raise RuntimeError("router_request_path_invalid")
+
+    parsed = urlparse(value)
+
+    if parsed.scheme or parsed.netloc:
+        raise RuntimeError("router_absolute_uri_forbidden")
+
+    if any(ord(ch) < 32 for ch in value):
+        raise RuntimeError("router_request_control_character")
+
+    return value
+
+
+def router_build_upstream_headers(headers, gateway):
+    result = {}
+
+    for name, value in headers.items():
+        low = name.lower()
+
+        if (
+            low in ROUTER_HOP_HEADERS
+            or low in ("host", "content-length")
+        ):
+            continue
+
+        if low == "referer":
+            value = router_rewrite_referer(value, gateway)
+
+        elif low == "origin":
+            value = "http://" + gateway
+
+        result[name] = value
+
+    result["Host"] = gateway
+    result["Connection"] = "close"
+
+    return result
+
+
+def router_upstream_exchange(method, path, headers, body=b""):
+    method = _safe_str(method, 16).upper()
+
+    if method not in ("GET", "HEAD", "POST"):
+        raise RuntimeError("router_method_not_allowed")
+
+    path = router_validate_request_path(path)
+
+    if body is None:
+        body = b""
+
+    if not isinstance(body, (bytes, bytearray)):
+        raise RuntimeError("router_request_body_invalid")
+
+    if len(body) > ROUTER_MAX_REQUEST_BODY:
+        raise RuntimeError("router_request_body_too_large")
+
+    target = load_router_network_contract()
+    gateway = target["gateway_ipv4"]
+
+    upstream_headers = router_build_upstream_headers(
+        headers,
+        gateway
+    )
+
+    conn = http.client.HTTPConnection(
+        gateway,
+        target["target_port"],
+        timeout=ROUTER_HTTP_TIMEOUT
+    )
+
+    try:
+        conn.request(
+            method,
+            path,
+            body=bytes(body) if body else None,
+            headers=upstream_headers
+        )
+
+        response = conn.getresponse()
+        response_body = response.read(
+            ROUTER_MAX_RESPONSE_BODY + 1
+        )
+
+        if len(response_body) > ROUTER_MAX_RESPONSE_BODY:
+            raise RuntimeError("router_response_too_large")
+
+        response_headers = []
+
+        for name, value in response.getheaders():
+            low = name.lower()
+
+            if (
+                low in ROUTER_HOP_HEADERS
+                or low == "content-length"
+            ):
+                continue
+
+            if low == "location":
+                value = router_rewrite_location(
+                    value,
+                    gateway
+                )
+
+            response_headers.append(
+                (name, value)
+            )
+
+        return {
+            "status": response.status,
+            "reason": response.reason,
+            "headers": response_headers,
+            "body": response_body,
+            "gateway_ipv4": gateway,
+        }
+
+    except RuntimeError:
+        raise
+
+    except (
+        OSError,
+        http.client.HTTPException
+    ) as exc:
+        raise RuntimeError(
+            "router_upstream_unavailable"
+        ) from exc
+
+    finally:
+        conn.close()
 
 
 def read_policy():
@@ -5180,7 +5470,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         activation_locked = VERSION == CONTINUOUS_LIFECYCLE_VERSION
         disabled = "" if (local_allowed and not activation_locked) else " disabled"
         activation_note = (
-            '<div class="tool-lock">3.18.2: η παλιά τεχνική pairing φόρμα παραμένει ορατή μόνο ως αναφορά και είναι κλειδωμένη. '
+            '<div class="tool-lock">3.19.0: η παλιά τεχνική pairing φόρμα παραμένει ορατή μόνο ως αναφορά και είναι κλειδωμένη. '
             'Το customer onboarding / Portal activation θα υλοποιηθεί ως ξεχωριστή ροή.</div>'
             if activation_locked else ""
         )
@@ -5959,7 +6249,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
     def freeze_archived_actions(card_html):
         if not card_html:
             return ""
-        # UI-only safety layer. The 3.18.2 server-side POST gate remains authoritative.
+        # UI-only safety layer. The 3.19.0 server-side POST gate remains authoritative.
         return re.sub(r'<button type="submit"(?![^>]*\bdisabled\b)', '<button type="submit" disabled', card_html)
 
     def archived_tool(card_html, mode, when, prerequisites, rerun, meaning):
@@ -5967,7 +6257,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
             return ""
         documented = annotate_tool(card_html, mode, when, prerequisites, rerun, meaning)
         locked = freeze_archived_actions(documented)
-        return locked.replace('</h2>', '</h2><div class="tool-lock">Αρχειοθετημένο εργαλείο: η κατάσταση και η τεκμηρίωση διατηρούνται, αλλά η εκτέλεση είναι κλειδωμένη στην 3.18.2. Επανενεργοποίηση μόνο σε ελεγχόμενο maintenance checkpoint.</div>', 1)
+        return locked.replace('</h2>', '</h2><div class="tool-lock">Αρχειοθετημένο εργαλείο: η κατάσταση και η τεκμηρίωση διατηρούνται, αλλά η εκτέλεση είναι κλειδωμένη στην 3.19.0. Επανενεργοποίηση μόνο σε ελεγχόμενο maintenance checkpoint.</div>', 1)
 
     def collapsible(title, subtitle, body, count_label):
         if not body.strip():
@@ -5983,7 +6273,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "Verification-only / ephemeral one-time authorization ticket",
         "Όταν η Broker authorization ή το enrollment contract φαίνεται ασυνεπές.",
         "Paired Managed identity, local policy ALLOWED και έγκυρο server authorization.",
-        "Κλειδωμένο στην 3.18.2. Επανεκτέλεση μόνο σε maintenance build.",
+        "Κλειδωμένο στην 3.19.0. Επανεκτέλεση μόνο σε maintenance build.",
         "VERIFIED = το enrollment contract είναι έγκυρο. FAILED = δεν συνεχίζουμε σε runtime· ελέγχουμε Broker και logs.",
     )
     settings_html = archived_tool(
@@ -5991,7 +6281,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "Verification-only / raw .msh memory-only",
         "Για έλεγχο ότι το secure settings contract αντιστοιχεί στη σωστή εγκατάσταση και identity.",
         "Έγκυρο enrollment authorization και paired identity.",
-        "Κλειδωμένο στην 3.18.2. Δεν γίνεται blind retry one-time consume.",
+        "Κλειδωμένο στην 3.19.0. Δεν γίνεται blind retry one-time consume.",
         "VERIFIED = format/integrity/source συμφωνούν. FAILED = stop/fail-closed και έλεγχος contract.",
     )
     agent_html = archived_tool(
@@ -5999,7 +6289,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "Verification-only / binary downloaded προσωρινά, ποτέ execution",
         "Για διάγνωση architecture, SHA, ELF και εγκεκριμένου MeshAgent binary.",
         "Verified settings chain και σωστό architecture.",
-        "Κλειδωμένο στην 3.18.2. Χρήση μόνο με ρητό maintenance scope.",
+        "Κλειδωμένο στην 3.19.0. Χρήση μόνο με ρητό maintenance scope.",
         "VERIFIED = binary integrity/architecture σωστά. FAILED = δεν επιτρέπεται execution.",
     )
     runtime_html = archived_tool(
@@ -6007,7 +6297,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "Verification-only / short runtime lease + μία renewal / no MeshAgent",
         "Για διάγνωση του lease contract χωρίς πραγματική MeshCentral εκτέλεση.",
         "Verified authorization/settings/agent chain.",
-        "Κλειδωμένο στην 3.18.2. Δεν απαιτείται για καθημερινή λειτουργία.",
+        "Κλειδωμένο στην 3.19.0. Δεν απαιτείται για καθημερινή λειτουργία.",
         "Renewed once = το lease pipeline λειτουργεί. Failure = ελέγχουμε authorization/gateway πριν από runtime.",
     )
     canary_html = archived_tool(
@@ -6015,7 +6305,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "Controlled foreground execution ≤45s / identity continuity",
         "Μόνο όταν χρειάζεται να αποδειχθεί ξανά ότι χρησιμοποιείται η ίδια MeshCentral identity.",
         "Verified chain, stable identity και ρητό maintenance approval.",
-        "Κλειδωμένο στην 3.18.2. Όχι επανάληψη ως routine test.",
+        "Κλειδωμένο στην 3.19.0. Όχι επανάληψη ως routine test.",
         "VERIFIED = ίδια identity/node και cleanup σωστό. FAILED = δεν κάνουμε νέο canary πριν διαβάσουμε logs/state.",
     )
     migration_preflight_html = archived_tool(
@@ -6023,7 +6313,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "Read-only authenticated preflight / no node move",
         "Για έλεγχο per-installation target group/controller binding πριν από migration/recovery εργασία.",
         "Paired identity, valid authorization και υπάρχον stable node.",
-        "Κλειδωμένο στην 3.18.2. Μπορεί να επανενεργοποιηθεί μελλοντικά ως ασφαλές diagnostic.",
+        "Κλειδωμένο στην 3.19.0. Μπορεί να επανενεργοποιηθεί μελλοντικά ως ασφαλές diagnostic.",
         "VERIFIED = profile/group/controller/identity συμφωνούν. FAILED = δεν επιτρέπεται migration action.",
     )
     migration_target_settings_html = archived_tool(
@@ -6031,7 +6321,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "Verification-only / target .msh memory-only / no execution",
         "Για επιβεβαίωση του exact per-installation target configuration.",
         "Verified migration preflight και server authorization.",
-        "Κλειδωμένο στην 3.18.2. One-time material δεν καταναλώνεται ξανά χωρίς σχεδιασμό.",
+        "Κλειδωμένο στην 3.19.0. One-time material δεν καταναλώνεται ξανά χωρίς σχεδιασμό.",
         "VERIFIED = target settings αντιστοιχούν στην εγκατάσταση. FAILED = σταματάμε πριν από runtime source change.",
     )
     migration_canary_html = archived_tool(
@@ -6039,7 +6329,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "Controlled migration execution / προσωρινό runtime-source switch",
         "Μόνο για ειδική διερεύνηση migration continuity με παρακολούθηση MeshCentral.",
         "Verified target settings, stable identity και explicit maintenance checkpoint.",
-        "Κλειδωμένο στην 3.18.2. Δεν είναι routine diagnostic και δεν γίνεται blind rerun.",
+        "Κλειδωμένο στην 3.19.0. Δεν είναι routine diagnostic και δεν γίνεται blind rerun.",
         "PASS = ίδια stable συσκευή εμφανίζεται στον target χώρο και επιστρέφει σωστά. Failure = stop και forensic review.",
     )
     identity_reseed_html = archived_tool(
@@ -6047,7 +6337,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "State-changing / δημιουργεί quarantined candidate identity",
         "Μόνο για recovery όταν υπάρχει τεκμηριωμένη ανάγκη νέας candidate identity.",
         "Verified target chain, backup/rollback plan και ρητή τεχνική έγκριση.",
-        "Κλειδωμένο στην 3.18.2. One-shot style workflow — ποτέ αυθόρμητη επανάληψη.",
+        "Κλειδωμένο στην 3.19.0. One-shot style workflow — ποτέ αυθόρμητη επανάληψη.",
         "VERIFIED = candidate δημιουργήθηκε χωρίς να χαθεί η παλιά identity. FAILED = διατηρούμε rollback και δεν προωθούμε candidate.",
     )
     candidate_reconnect_html = archived_tool(
@@ -6055,7 +6345,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "Controlled execution / reconnect υπάρχουσας quarantined candidate",
         "Για να αποδειχθεί ότι η ίδια candidate επανασυνδέεται χωρίς duplicate node.",
         "Υπάρχουσα verified candidate και intact shared rollback identity.",
-        "Κλειδωμένο στην 3.18.2. Χρήση μόνο πριν από ειδικά σχεδιασμένη promotion/recovery εργασία.",
+        "Κλειδωμένο στην 3.19.0. Χρήση μόνο πριν από ειδικά σχεδιασμένη promotion/recovery εργασία.",
         "VERIFIED = ίδια candidate online, χωρίς νέα συσκευή. FAILED = δεν προχωρά permanent promotion.",
     )
     promotion_html = archived_tool(
@@ -6063,7 +6353,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "High-impact state change / permanent local identity promotion",
         "Μόνο όταν υπάρχει verified candidate και έχει εγκριθεί permanent target runtime promotion.",
         "Verified reconnect proof, rollback backup και ρητή τεχνική απόφαση.",
-        "Κλειδωμένο στην 3.18.2. Ποτέ ως diagnostic retry.",
+        "Κλειδωμένο στην 3.19.0. Ποτέ ως diagnostic retry.",
         "PASS = target identity γίνεται stable και rollback παραμένει διαθέσιμο. Failure = αποκατάσταση rollback και πλήρης έλεγχος logs.",
     )
     first_device_settings_html = archived_tool(
@@ -6071,7 +6361,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
         "Historical one-time first-device settings verification",
         "Μόνο για forensic αναφορά του αρχικού ID-34973 first-device provisioning checkpoint.",
         "Exact historical scope ID-34973 / amd64.",
-        "Ολοκληρωμένο checkpoint — δεν επαναλαμβάνεται στην 3.18.2.",
+        "Ολοκληρωμένο checkpoint — δεν επαναλαμβάνεται στην 3.19.0.",
         "VERIFIED = το αρχικό Portal-bound .msh contract είχε επιβεβαιωθεί χωρίς execution.",
     )
     first_device_execution_html = archived_tool(
@@ -6084,7 +6374,7 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
     )
 
     if identity is None:
-        next_action = "Η 3.18.2 δεν ανοίγει νέα Managed identity. Η αρχική ενεργοποίηση πελάτη θα σχεδιαστεί ξεχωριστά μέσω Portal."
+        next_action = "Η 3.19.0 δεν ανοίγει νέα Managed identity. Η αρχική ενεργοποίηση πελάτη θα σχεδιαστεί ξεχωριστά μέσω Portal."
     elif not local_allowed:
         next_action = "Ελέγξτε πρώτα την local policy / subscription κατάσταση. Το runtime παραμένει fail-closed."
     elif not server_allowed:
@@ -6178,8 +6468,179 @@ def render_page(local_snapshot, notice="", notice_kind="info"):
 </main></body></html>'''
 
 
+ROUTER_COMPAT_LOCK = threading.Lock()
+ROUTER_COMPAT_SERVER = None
+ROUTER_COMPAT_THREAD = None
+
+
+class RouterCompatibilityHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        return
+
+    def _json_error(self, status, code):
+        payload = json.dumps(
+            {"ok": False, "code": code},
+            ensure_ascii=False,
+            separators=(",", ":")
+        ).encode("utf-8")
+
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        if self.command != "HEAD":
+            self.wfile.write(payload)
+
+        self.close_connection = True
+
+    def _proxy(self):
+        transfer = _safe_str(
+            self.headers.get("Transfer-Encoding"), 100
+        ).lower()
+
+        if transfer and transfer != "identity":
+            self._json_error(400, "router_transfer_encoding_forbidden")
+            return
+
+        raw_length = self.headers.get("Content-Length")
+
+        try:
+            length = int(raw_length) if raw_length else 0
+        except (TypeError, ValueError):
+            self._json_error(400, "router_content_length_invalid")
+            return
+
+        if length < 0 or length > ROUTER_MAX_REQUEST_BODY:
+            self._json_error(413, "router_request_body_too_large")
+            return
+
+        body = self.rfile.read(length) if length else b""
+
+        try:
+            result = router_upstream_exchange(
+                self.command,
+                self.path,
+                self.headers,
+                body
+            )
+        except RuntimeError as exc:
+            code = _safe_str(str(exc), 120)
+
+            if code in {
+                "router_request_path_invalid",
+                "router_absolute_uri_forbidden",
+                "router_request_control_character",
+                "router_method_not_allowed",
+                "router_request_body_invalid",
+                "router_request_body_too_large",
+            }:
+                status = 400
+            elif code == "router_upstream_unavailable":
+                status = 502
+            else:
+                status = 503
+
+            self._json_error(status, code or "router_proxy_failed")
+            return
+
+        self.send_response(
+            result["status"],
+            result["reason"]
+        )
+
+        for name, value in result["headers"]:
+            self.send_header(name, value)
+
+        self.send_header(
+            "Content-Length",
+            str(len(result["body"]))
+        )
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        if self.command != "HEAD":
+            self.wfile.write(result["body"])
+
+        self.close_connection = True
+
+    def do_GET(self):
+        self._proxy()
+
+    def do_HEAD(self):
+        self._proxy()
+
+    def do_POST(self):
+        self._proxy()
+
+
+def start_router_compatibility():
+    global ROUTER_COMPAT_SERVER
+    global ROUTER_COMPAT_THREAD
+
+    with ROUTER_COMPAT_LOCK:
+        if (
+            ROUTER_COMPAT_SERVER is not None
+            or ROUTER_COMPAT_THREAD is not None
+        ):
+            raise RuntimeError("router_compat_already_running")
+
+        server = ThreadingHTTPServer(
+            (ROUTER_COMPAT_HOST, ROUTER_COMPAT_PORT),
+            RouterCompatibilityHandler
+        )
+
+        thread = threading.Thread(
+            target=server.serve_forever,
+            name="managed-router-compatibility",
+            daemon=True
+        )
+
+        try:
+            thread.start()
+        except Exception:
+            server.server_close()
+            raise
+
+        ROUTER_COMPAT_SERVER = server
+        ROUTER_COMPAT_THREAD = thread
+
+    return True
+
+
+def stop_router_compatibility():
+    global ROUTER_COMPAT_SERVER
+    global ROUTER_COMPAT_THREAD
+
+    with ROUTER_COMPAT_LOCK:
+        server = ROUTER_COMPAT_SERVER
+        thread = ROUTER_COMPAT_THREAD
+
+        ROUTER_COMPAT_SERVER = None
+        ROUTER_COMPAT_THREAD = None
+
+    if server is None:
+        return False
+
+    server.shutdown()
+    server.server_close()
+
+    if (
+        thread is not None
+        and thread.is_alive()
+        and thread is not threading.current_thread()
+    ):
+        thread.join(timeout=3)
+
+    return True
+
+
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SmartProManaged/3.18.2"
+    server_version = "SmartProManaged/3.19.0"
 
     def _send(self, code, body, content_type):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
@@ -6299,7 +6760,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(409, render_page(read_policy(), "Η 3.17.4 είναι κλειδωμένο controlled retry/reset checkpoint. Επιτρέπονται μόνο reset consume και αργότερα explicit armed first-device execution.", "bad"), "text/html; charset=utf-8")
             return
         if VERSION == CONTINUOUS_LIFECYCLE_VERSION and not (is_persistent_start or is_persistent_stop):
-            self._send(409, render_page(read_policy(), "Η 3.18.2 είναι stable multi-architecture checkpoint. Επιτρέπονται μόνο explicit unattended start/stop. Τα παλιά mutation/test actions παραμένουν αρχειοθετημένα και δεν επαναλαμβάνονται.", "bad"), "text/html; charset=utf-8")
+            self._send(409, render_page(read_policy(), "Η 3.19.0 είναι stable multi-architecture checkpoint. Επιτρέπονται μόνο explicit unattended start/stop. Τα παλιά mutation/test actions παραμένουν αρχειοθετημένα και δεν επαναλαμβάνονται.", "bad"), "text/html; charset=utf-8")
             return
         if PERSISTENT_WORKER_ACTIVE and not (is_persistent_stop or is_group_migration_preflight or is_group_migration_target_settings or is_group_migration_canary or is_group_identity_reseed_canary or is_candidate_reconnect_canary or is_candidate_promotion):
             self._send(409, render_page(read_policy(), "Η continuous Managed λειτουργία είναι ενεργή. Επιτρέπονται μόνο ασφαλής τερματισμός ή οι verification-only migration έλεγχοι.", "bad"), "text/html; charset=utf-8")
@@ -6559,7 +7020,35 @@ if __name__ == "__main__":
         unattended_thread = threading.Thread(target=unattended_supervisor, name="managed-unattended-supervisor", daemon=True)
         unattended_thread.start()
         if VERSION == CONTINUOUS_LIFECYCLE_VERSION:
-            print("[managed] 3.18.2 multi-architecture compatibility: unattended supervisor available; explicit start/stop only; stable identity reuse required; archived actions locked; technician_actions=false", flush=True)
+            print("[managed] 3.19.0 multi-architecture compatibility: unattended supervisor available; explicit start/stop only; stable identity reuse required; archived actions locked; technician_actions=false", flush=True)
     else:
         print("[managed] 3.17.4 checkpoint lock: unattended supervisor NOT started; controlled retry reset requires explicit UI consume; execution still requires later Broker arm + UI action", flush=True)
-    ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+    router_compat_started = False
+
+    try:
+        try:
+            start_router_compatibility()
+            router_compat_started = True
+            print(
+                f"[managed] Router Compatibility listening on "
+                f"{ROUTER_COMPAT_HOST}:{ROUTER_COMPAT_PORT}",
+                flush=True
+            )
+        except (OSError, RuntimeError) as exc:
+            print(
+                f"[managed] Router Compatibility unavailable: "
+                f"{type(exc).__name__}",
+                flush=True
+            )
+
+        ThreadingHTTPServer(
+            ("0.0.0.0", PORT),
+            Handler
+        ).serve_forever()
+
+    finally:
+        if router_compat_started:
+            try:
+                stop_router_compatibility()
+            except Exception:
+                pass

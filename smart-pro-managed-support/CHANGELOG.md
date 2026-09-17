@@ -1,3 +1,15 @@
+## 3.19.0 — Router Compatibility Foundation
+
+- Adds the production Router Compatibility component to the verified Managed Support lifecycle.
+- Reads the current router candidate only from the trusted read-only `smart-pro-managed-network-v1` contract produced by Smart Pro Tools.
+- Accepts only validated private IPv4 default gateways and rejects stale, invalid or unexpected network contracts.
+- Exposes the compatibility endpoint only on `127.0.0.1:18080`; no LAN/public listener is created.
+- Rewrites router-facing `Host`, `Referer`, `Origin` and router-local redirect locations as required for WebRelay compatibility.
+- Supports bounded GET/HEAD/POST proxying with request/response size limits and hop-by-hop header filtering.
+- Router credentials are neither stored nor introduced by this release.
+- Keeps the verified stable MeshAgent identity, unattended renewable lifecycle, `/data` persistence, Broker protocol and historical mutation/test locks.
+- Keeps `amd64` and `aarch64` support.
+
 ## 3.18.2 — Multi-Architecture Compatibility
 - Adds Home Assistant add-on support for both `amd64` and `aarch64`.
 - Moves the stable continuous-lifecycle version gate from 3.18.1 to 3.18.2 so update-in-place retains unattended supervisor recovery and the explicit Start/Pause-only POST boundary.
