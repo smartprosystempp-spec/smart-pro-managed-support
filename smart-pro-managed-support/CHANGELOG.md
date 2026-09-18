@@ -1,3 +1,7 @@
+## 3.19.1 — Active Terminal Relay Termination Pilot
+
+The existing persistent-runtime watch now consumes a Broker monotonic termination generation. When a newer generation arrives after verified Terminal rights have returned to zero, only the foreground MeshAgent process group is terminated and immediately relaunched with the same persisted stable identity. This closes already-open MeshCentral Terminal relays while keeping the add-on and Managed enrollment alive. The pilot is intentionally coarse-grained: recycling the foreground MeshAgent can interrupt any other relay on the same node, so validation starts with Terminal as the only active capability.
+
 ## 3.19.0 — Router Compatibility Foundation
 
 - Adds the production Router Compatibility component to the verified Managed Support lifecycle.

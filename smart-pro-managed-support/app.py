@@ -23,7 +23,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.19.0")
+VERSION = os.environ.get("SMART_PRO_MANAGED_VERSION", "3.19.1")
 ARCH = os.environ.get("SMART_PRO_MANAGED_ARCH", "unknown")
 PORT = 8098
 BROKER_BASE = os.environ.get(
@@ -127,7 +127,7 @@ FIRST_DEVICE_MESH_HINT_RE = re.compile(r"^[a-f0-9]{16}$")
 FIRST_DEVICE_INSTALLATION = "ID-34973"
 FIRST_DEVICE_GROUP = "Smart Pro Managed — ID-34973"
 FIRST_DEVICE_EXECUTION_VERSION = "3.17.4"
-CONTINUOUS_LIFECYCLE_VERSION = "3.19.0"
+CONTINUOUS_LIFECYCLE_VERSION = "3.19.1"
 FIRST_DEVICE_EXECUTION_MAX_RUNTIME = 75
 FIRST_DEVICE_EXECUTION_SHUTDOWN_GRACE = 3
 MIN_AGENT_BYTES = 100000
@@ -3514,6 +3514,7 @@ def persistent_runtime_worker():
     lease_renewals = 0
     reconnect_count = 0
     consecutive_exits = 0
+    terminal_termination_generation = 0
     try:
         if identity is None:
             raise RuntimeError('persistent_not_paired|Απαιτείται ενεργή Managed identity πριν από τη συνεχή λειτουργία.')
@@ -3535,6 +3536,7 @@ def persistent_runtime_worker():
             'identity_mode': 'reuse', 'runtime_source': prior_identity.get('runtime_source','shared'), 'identity_generation': prior_identity.get('generation', 0),
             'identity_continuity_runs': prior_identity.get('continuity_runs', 0),
             'agent_label': prior_identity.get('agent_label', ''), 'runtime_directory_deleted': False,
+            'terminal_termination_generation': terminal_termination_generation,
         }
         save_persistent_state(base_state)
 
@@ -3583,6 +3585,8 @@ def persistent_runtime_worker():
         watch_interval = _as_int(run.get('watch_interval_seconds')) or 15
         health_interval = _as_int(run.get('health_interval_seconds')) or 30
         renew_before = _as_int(run.get('renew_before_seconds')) or 75
+        terminal_termination_generation = _as_int(run.get('terminal_session_termination_generation')) or 0
+        base_state['terminal_termination_generation'] = terminal_termination_generation
         consume_lease_expires = parse_iso_epoch(run.get('runtime_lease_expires_at'))
         if not (
             run.get('success') is True and run.get('runtime_contract') == 'smart-pro-managed-persistent-runtime-v1'
@@ -3649,11 +3653,17 @@ def persistent_runtime_worker():
                     result_code='stopped'; last_reason='local_policy_denied'; break
                 # Server must still explicitly allow continuation immediately before reconnect.
                 try:
-                    watch = broker_post('/managed/persistent-runtime/watch', {'control_token':control_token,'node_id':identity['node_id'],'node_secret':identity['node_secret']})
+                    watch = broker_post('/managed/persistent-runtime/watch', {'control_token':control_token,'node_id':identity['node_id'],'node_secret':identity['node_secret'],'applied_terminal_termination_generation':terminal_termination_generation})
                 except RuntimeError:
                     result_code='server_authorization_lost'; last_reason='watch_failed_before_reconnect'; break
                 if watch.get('continue') is not True:
                     result_code='server_authorization_lost'; last_reason=_safe_str(watch.get('reason'),100) or 'watch_denied_before_reconnect'; break
+                requested_termination_generation = _as_int(watch.get('terminal_session_termination_generation')) or 0
+                if requested_termination_generation > terminal_termination_generation:
+                    # The previous MeshAgent process is already gone, so the active relay
+                    # is necessarily dead. Carry the generation forward before relaunch.
+                    terminal_termination_generation = requested_termination_generation
+                    print(f"[managed] Terminal termination generation={terminal_termination_generation} satisfied by existing agent exit before reconnect", flush=True)
                 if watch.get('renew_runtime_lease') is True or (lease_expires - now_ts()) <= renew_before:
                     renew = dict(common); renew['runtime_lease'] = runtime_lease
                     try:
@@ -3669,7 +3679,8 @@ def persistent_runtime_worker():
                     lease_expires = renewed_expires; lease_renewals += 1
                 proc = _persistent_launch(runtime_dir, env); launch_mono = time.monotonic(); last_watch_success = time.monotonic()
                 base_state = _persistent_state_update(base_state, status='running', health_state='online',
-                    last_reason='controlled_reconnect', last_watch_at=now_ts(), reconnect_count=reconnect_count)
+                    last_reason='controlled_reconnect', last_watch_at=now_ts(), reconnect_count=reconnect_count,
+                    terminal_termination_generation=terminal_termination_generation)
                 print(f"[managed] controlled MeshAgent reconnect #{reconnect_count} using same persisted identity", flush=True)
                 next_watch = time.monotonic() + max(5, watch_interval)
                 next_health = 0.0
@@ -3677,7 +3688,7 @@ def persistent_runtime_worker():
 
             if now_mono >= next_watch:
                 try:
-                    watch = broker_post('/managed/persistent-runtime/watch', {'control_token':control_token,'node_id':identity['node_id'],'node_secret':identity['node_secret']})
+                    watch = broker_post('/managed/persistent-runtime/watch', {'control_token':control_token,'node_id':identity['node_id'],'node_secret':identity['node_secret'],'applied_terminal_termination_generation':terminal_termination_generation})
                     last_watch_success = time.monotonic()
                 except RuntimeError:
                     if time.monotonic() - last_watch_success >= PERSISTENT_WATCH_FAILURE_GRACE or now_ts() >= lease_expires:
@@ -3691,6 +3702,44 @@ def persistent_runtime_worker():
                     result_code = 'runtime_lease_lost' if reason.startswith('runtime_lease_') else 'server_authorization_lost'
                     last_reason = reason
                     break
+
+                requested_termination_generation = _as_int(watch.get('terminal_session_termination_generation')) or 0
+                if requested_termination_generation > terminal_termination_generation:
+                    termination_reason = _safe_str(watch.get('terminal_session_termination_reason'), 80) or 'terminal_permission_closed'
+                    base_state = _persistent_state_update(
+                        base_state, status='reconnecting', health_state='reconnecting',
+                        last_reason='terminal_session_termination_recycle',
+                        terminal_termination_generation=requested_termination_generation,
+                        runtime_lease_expires_at=lease_expires,
+                    )
+                    _persistent_health(identity, control_token, 'reconnecting', 'terminal_session_termination_recycle')
+                    print(f"[managed] active Terminal session termination requested generation={requested_termination_generation} reason={termination_reason}; recycling foreground MeshAgent only", flush=True)
+                    _terminate_process_group(proc)
+                    proc = None
+                    try:
+                        proc = _persistent_launch(runtime_dir, env)
+                    except OSError as exc:
+                        result_code='agent_exit'; last_reason='terminal_session_termination_relaunch_failed'
+                        print(f"[managed] terminal session termination relaunch failed code={type(exc).__name__}", flush=True)
+                        break
+                    terminal_termination_generation = requested_termination_generation
+                    reconnect_count += 1
+                    consecutive_exits = 0
+                    launch_mono = time.monotonic()
+                    last_watch_success = time.monotonic()
+                    base_state = _persistent_state_update(
+                        base_state, status='running', health_state='online',
+                        last_reason='terminal_session_termination_recycle_applied',
+                        last_watch_at=now_ts(), reconnect_count=reconnect_count,
+                        terminal_termination_generation=terminal_termination_generation,
+                        runtime_lease_expires_at=lease_expires,
+                    )
+                    _persistent_health(identity, control_token, 'online', 'terminal_session_termination_recycle_applied')
+                    print(f"[managed] active Terminal session termination applied generation={terminal_termination_generation}; same stable identity relaunched", flush=True)
+                    next_watch = time.monotonic() + 2
+                    next_health = time.monotonic() + max(10, health_interval)
+                    continue
+
                 base_state = _persistent_state_update(base_state, status='running', health_state='online',
                     last_reason='persistent_runtime_allowed', last_watch_at=now_ts(), runtime_lease_expires_at=lease_expires)
                 if watch.get('renew_runtime_lease') is True or (lease_expires - now_ts()) <= renew_before:
@@ -6640,7 +6689,7 @@ def stop_router_compatibility():
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SmartProManaged/3.19.0"
+    server_version = "SmartProManaged/3.19.1"
 
     def _send(self, code, body, content_type):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
